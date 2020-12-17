@@ -1,17 +1,18 @@
-## My Project
+![AWS Marketplace logo](logo.png)
 
-TODO: Fill this README out!
+# AWS Marketplace
 
-Be sure to:
+[AWS Marketplace](https://docs.aws.amazon.com/marketplace/) is an online store where you can buy or sell cloud-native software, services and data. This repository contains samples for interacting with various AWS Marketplace APIs. For AWS Data Exchange API, see [aws-dataexchange-api-samples](https://github.com/aws-samples/aws-dataexchange-api-samples).
 
-* Change the title in this README
-* Edit your repository description on GitHub
+## AWS Marketplace Metering Service API
 
-## Security
+* [Documentation](https://docs.aws.amazon.com/marketplacemetering/latest/APIReference/Welcome.html)
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+## AWS Marketplace Entitlement Service API
 
-## License
+* [Documentation](https://docs.aws.amazon.com/marketplaceentitlement/latest/APIReference/Welcome.html)
 
-This library is licensed under the MIT-0 License. See the LICENSE file.
+## AWS Marketplace Catalog API
 
+* [Documentation](https://docs.aws.amazon.com/marketplace-catalog/latest/api-reference/welcome.html)
+* [Enumerate Products (Ruby)](catalog-api/enumerate-products-ruby)
