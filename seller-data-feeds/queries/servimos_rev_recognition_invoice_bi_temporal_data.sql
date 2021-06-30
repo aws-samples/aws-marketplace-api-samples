@@ -1,5 +1,8 @@
 -- Revenue Recognition Reporting at Invoice Time
 
+-- DISCLAIMER: This query uses the Agreement Feed, which is currently in private beta.
+-- This query will be changed before General Availability (GA).
+
 -- General note: When executing this query we are assuming that the data ingested in the database is using
 -- two time axes (the valid_from column and the update_date column).
 -- See documentation for more details: https://docs.aws.amazon.com/marketplace/latest/userguide/data-feed.html#data-feed-details
