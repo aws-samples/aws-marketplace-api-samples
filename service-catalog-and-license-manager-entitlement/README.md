@@ -21,7 +21,7 @@ Create a stack that deploys AWS resources including an AWS Lambda function, an E
 
 The Lambda function receives an event from EventBridge with the product information. It verifies that the portfolio is shared with the relevant organizational unit. Then it associates products of type MARKETPLACE with the shared portfolio. In case of failed verification, it handles errors and log relevant information.
 
-Launch the CloudFormation stack [slack.yaml](/slack.yaml).
+Launch the CloudFormation stack [stack.yaml](./stack.yaml).
 
 This template performs the following functions automatically:
 1.	When the Private Marketplace admin triggers the ImporttoServicecatalog API call by choosing Copy to Service Catalog in AWS Marketplace product.
