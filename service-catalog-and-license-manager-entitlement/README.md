@@ -10,10 +10,10 @@ Figure 1 represent a high-level flow of the solution architecture. Private Marke
 ![Architecture](./imgs/Arch.png)
 
 ## Prerequisites
-•	Child accounts must be enrolled in the same AWS Organizations as the management account.
-•	Your Private Marketplace experience must be in enabled state. 
-•	Enable trusted access with License Manager in the AWS Accounts
-•	Enable trusted access for AWS Marketplace - License Management
+- Child accounts must be enrolled in the same AWS Organizations as the management account.
+- Your Private Marketplace experience must be in enabled state. 
+- Enable trusted access with License Manager in the AWS Accounts
+- Enable trusted access for AWS Marketplace - License Management
 
 ## Deployment
 
@@ -27,19 +27,19 @@ This template performs the following functions automatically:
 1.	When the Private Marketplace admin triggers the ImporttoServicecatalog API call by choosing Copy to Service Catalog in AWS Marketplace product.
 2.	The EventBridge rule catches the API call and publishes the event message to a Lambda function resource named privatemarketplace.
 3.	For "type":"MARKETPLACE" products and "status":"CREATED" events, the function triggers the following automated portfolio management tasks in AWS Service Catalog:
-•	Validates that the portfolio is shared
-•	Update the portfolio with new Private Marketplace product association
-•	Gracefully handle any exception.
+    - Validates that the portfolio is shared
+    - Update the portfolio with new Private Marketplace product association
+    - Gracefully handle any exception.
 4.	For subscribed AWS Marketplace product events, the function triggers the following automated AWS License Manager tasks:
-•	On management account AWS License Manager, grant subscribed product license to child account.
-•	On child account AWS License Manager, accept and activate granted subscribed product license.
+    - On management account AWS License Manager, grant subscribed product license to child account.
+    - On child account AWS License Manager, accept and activate granted subscribed product license.
 
 
 ## Cleaning up
 To avoid incurring future charges, delete all resources that you created via AWS CloudFormation by deleting the stack. On the AWS CloudFormation console, choose the stack and then choose Delete stack.
 1.	Un-share AWS Service Catalog portfolio PrivateMarketplace
-•	In the AWS Service Catalog console, navigate to portfolio and choose the PrivateMarketplace portfolio created as part of the automation stack deployed in Step 3.
-•	Select the Share tab and un-share each entry. 
+    - In the AWS Service Catalog console, navigate to portfolio and choose the PrivateMarketplace portfolio created as part of the automation stack deployed in Step 3.
+    - Select the Share tab and un-share each entry. 
 2.	Delete automation stack on AWS CloudFormation console, choose stack and select Delete stack.
 
 
