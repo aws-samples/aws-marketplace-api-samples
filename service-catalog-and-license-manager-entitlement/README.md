@@ -7,6 +7,8 @@ After you have subscribed to an AWS Marketplace product, you can distribute the 
 This automated entitlement distribution solution replaces two workflows. First is the creation and activation of subscribed products license by automating AWS License Manager grants. Second, by automating the relevant AWS Service Catalog portfolio creation, product definition, and association of subscribed Private Marketplace product to portfolio tasks. The trigger to automated distribution is an Amazon EventBridge rule that watches out for the ImporttoServiceCatalog API call made by Private Marketplace admins.
 Figure 1 represent a high-level flow of the solution architecture. Private Marketplace admin triggers this flow by initiating an AWS Marketplace product Copy to Service Catalog action. EventBridge traps this action then invoke an AWS Lambda function that implement and monitor the necessary AWS Service Catalog portfolio tasks. 
 
+![Architecture](./imgs/Arch.png)
+
 ## Prerequisites
 •	Child accounts must be enrolled in the same AWS Organizations as the management account.
 •	Your Private Marketplace experience must be in enabled state. 
