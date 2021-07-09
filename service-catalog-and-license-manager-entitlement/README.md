@@ -19,8 +19,6 @@ Figure 1 represent a high-level flow of the solution architecture. Private Marke
 
 Create a stack that deploys AWS resources including an AWS Lambda function, an EventBridge rule, AWS License grant and activation and an AWS Service Catalog portfolio from the provided AWS CloudFormation template in the payer AWS account. The template implements event-driven automation that generates subscribed AWS Marketplace product entitlement grant for child accounts on AWS License Manager. It also adds the subscribed AWS Marketplace product to that AWS Service Catalog portfolio, which will be shared across your landing zone.  
 
-The Lambda function receives an event from EventBridge with the product information. It verifies that the portfolio is shared with the relevant organizational unit. Then it associates products of type MARKETPLACE with the shared portfolio. In case of failed verification, it handles errors and log relevant information.
-
 Launch the CloudFormation stack [stack.yaml](./stack.yaml).
 
 This template performs the following functions automatically:
@@ -30,13 +28,13 @@ This template performs the following functions automatically:
     - Validates that the portfolio is shared
     - Update the portfolio with new Private Marketplace product association
     - Gracefully handle any exception.
-4.	For subscribed AWS Marketplace product events, the function triggers the following automated AWS License Manager tasks:
+4.	For subscribed AWS Marketplace product events, the Lambada function triggers the following automated AWS License Manager tasks:
     - On management account AWS License Manager, grant subscribed product license to child account.
     - On child account AWS License Manager, accept and activate granted subscribed product license.
 
 
 ## Cleaning up
-To avoid incurring future charges, delete all resources that you created via AWS CloudFormation by deleting the stack. On the AWS CloudFormation console, choose the stack and then choose Delete stack.
+To avoid incurring future charges, delete all resources that you created via AWS CloudFormation by deleting the stack. Follow the steps below to clean up the deployed resources.
 1.	Un-share AWS Service Catalog portfolio PrivateMarketplace
     - In the AWS Service Catalog console, navigate to portfolio and choose the PrivateMarketplace portfolio created as part of the automation stack deployed in Step 3.
     - Select the Share tab and un-share each entry. 
