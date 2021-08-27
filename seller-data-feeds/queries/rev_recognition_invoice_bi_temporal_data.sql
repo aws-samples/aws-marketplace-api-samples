@@ -531,15 +531,14 @@ from invoiced_transactions inv
     left join accounts_with_history_with_company_name acc_enduser on inv.end_user_account_id = acc_enduser.account_id
                                                                     and (inv.invoice_date_as_date >= acc_enduser.valid_from  and inv.invoice_date_as_date < acc_enduser.valid_to)
 
-    -- TODO left join because agreement feed is not GA yet and not 100% backfilled yet -> will be moved to INNER join after backfill
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
-
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
+    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
-    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed (yet, Nimish seeking Legal Approval)
     left join offers_with_history_with_target_type off on agg.offer_id = off.offer_id and (inv.invoice_date_as_date >= off.valid_from  and inv.invoice_date_as_date < off.valid_to)
 
 )
 select * from revenue_recognition_at_invoice_time
--- if you want to filter on a specific month, simply do: where "Invoice Date" between '2021-04-01' and '2021-04-30'
+-- To filter on a specific month, uncomment the following and replace the dates:
+-- where "Invoice Date" between '2021-04-01' and '2021-04-30'
