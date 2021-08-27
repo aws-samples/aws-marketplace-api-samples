@@ -72,6 +72,7 @@ agreements_with_uni_temporal_data as (
             *,
             ROW_NUMBER() OVER (PARTITION BY agreement_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
         from
+            -- TODO change to agreementfeed_v1 when Agreement Feed is GA'ed
             agreementfeed
     )
     where
@@ -533,6 +534,7 @@ from invoiced_transactions inv
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
+    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
     left join offers_with_history_with_target_type off on agg.offer_id = off.offer_id and (inv.invoice_date_as_date >= off.valid_from  and inv.invoice_date_as_date < off.valid_to)
 
