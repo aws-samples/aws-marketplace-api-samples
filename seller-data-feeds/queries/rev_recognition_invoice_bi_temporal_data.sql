@@ -407,8 +407,12 @@ disbursed_line_items as (
     line_items.parent_billing_event_id,
     line_items.product_id,
     line_items.transaction_type,
-    amount,
-    disbursements.disbursement_date,
+    line_items.amount,
+    --Currently, partial payment is not allowed, but will be available in future, this is to identify per billing_event_id, how much has been disbursed in total
+    sum(line_items.amount) over (partition by line_items.parent_billing_event_id) disbursed_amount_per_parent,
+    --Similarly, when partial payment is implemented, this will catch the most recent date of disbursement
+    --Note: format is subject to change when partial payment is implemented as we are also planning to show all previous disbursed dates if a billing_event_id is disbursed for more than 1 time
+    max(disbursements.disbursement_date) over (partition by line_items.parent_billing_event_id) last_disbursement_date,
     disbursements.disbursement_id,
     disbursements.bank_trace_id
   from
@@ -436,21 +440,23 @@ disbursed_line_items as (
          from_account_id
  ),
 --Join invoiced_item with disbursement_item to find out if the invoice has been disbursed
---'DISBURSED' action does not have 'AWS_TAX_SHARE' AND 'AWS_TAX_SHARE_REFUND' transaction_type.
+--'DISBURSED' action does not have 'AWS_TAX_SHARE' AND 'AWS_TAX_SHARE_REFUND' transaction_type, therefore, for billing_event_id with 'AWS_TAX_SHARE' AND 'AWS_TAX_SHARE_REFUND' transaction_type, we can't identify if it has been disbursed.
 --Will unify disburse_flag based on invoice_id next step.
 invoiced_line_items_with_disbursement_info  as(
     select invoice.*,
     case
-        when disburse.parent_billing_event_id is not null then 'Yes'
+        when disburse.parent_billing_event_id is not null and - disburse.disbursed_amount_per_parent = invoice.amount then 'Yes'
+        when disburse.parent_billing_event_id is not null and - disburse.disbursed_amount_per_parent <> invoice.amount then 'Partial'
         else 'No'
     end as disburse_flag_temp,
-    disburse.disbursement_date as disbursement_date,
-    - disburse.amount disburse_amount,
+    disburse.last_disbursement_date,
+    - disburse.disbursed_amount_per_parent disburse_amount,
     disburse.bank_trace_id disburse_bank_trace_id
     from
         invoiced_billing_events_with_uni_temporal_data invoice
     left join
-        disbursed_line_items disburse on invoice.billing_event_id = disburse.parent_billing_event_id),
+        (select distinct parent_billing_event_id, disbursed_amount_per_parent, last_disbursement_date, bank_trace_id from disbursed_line_items )disburse on invoice.billing_event_id = disburse.parent_billing_event_id),
+
 --unify disburse_flag across invoice_id
 invoiced_disbursed_disburse_flag_invoice_unified as(
     select  invoice_item.billing_event_id,
@@ -471,6 +477,7 @@ invoiced_disbursed_disburse_flag_invoice_unified as(
             invoice_item.end_user_account_id,
             invoice_item.billing_address_id,
             invoice_item.amount,
+            disbursed_item.disburse_amount,
             invoice_item.currency,
             invoice_item.agreement_id,
             invoice_item.invoice_id,
@@ -479,27 +486,30 @@ invoiced_disbursed_disburse_flag_invoice_unified as(
             invoice_item.usage_period_end_date,
            case
                when disbursed_item.invoice_id is null then 'No'
+               when disbursed_item.disburse_flag_temp = 'Partial' then 'Partial'
                else 'Yes'
            end as disburse_flag,
-           disbursed_item.disbursement_date as disbursement_date,
+           disbursed_item.last_disbursement_date,
            disbursed_item.disburse_bank_trace_id as disburse_bank_trace_id
     from
         invoiced_line_items_with_disbursement_info invoice_item
     left join
         (select distinct invoice_id,
-                disbursement_date,
-                disburse_bank_trace_id
+                last_disbursement_date,
+                disburse_bank_trace_id,
+                disburse_amount,
+                disburse_flag_temp
             from invoiced_line_items_with_disbursement_info
-            where disburse_flag_temp = 'Yes' ) disbursed_item
+            where disburse_flag_temp in ('Yes','Partial') ) disbursed_item
         on invoice_item.invoice_id = disbursed_item.invoice_id
-) ,
+),
 invoiced_transactions as (
   select
         currency,
         -- We are separating Revenue and Cost of Goods Sold below:
         --  customer invoiced seller_rev_share records expose from_account_id=<customer> to_account_id=Seller
         --  while COGS records expose from_account_id=Seller to_account_id=<manufacturer>
-        sum(case when transaction_type = 'SELLER_REV_SHARE' and  to_account_id =(select seller_account_id from seller_account)   then amount else 0 end) as gross_revenue,
+        sum(case when transaction_type = 'SELLER_REV_SHARE' and  to_account_id =(select seller_account_id from seller_account) then amount else 0 end) as gross_revenue,
         sum(case when transaction_type = 'AWS_REV_SHARE' then amount else 0 end) as aws_rev_share,
         -- _CREDIT is a form of refunds, hence we club those 2 together
         sum(case when transaction_type in ('SELLER_REV_SHARE_REFUND','SELLER_REV_SHARE_CREDIT') and to_account_id =(select seller_account_id from seller_account) then amount else 0 end) as gross_refunds,
@@ -518,8 +528,9 @@ invoiced_transactions as (
         invoice_date,
         invoice_id,
         transaction_reference_id,
+        disburse_amount,
         disburse_flag,
-        disbursement_date,
+        last_disbursement_date,
         disburse_bank_trace_id,
         max(
             case
@@ -551,8 +562,9 @@ invoiced_transactions as (
         -- will always have same value given above grouping fields -> cleaner to group by in here rather than using a max or min in the select
         payment_due_date,
         transaction_reference_id,
+        disburse_amount,
         disburse_flag,
-        disbursement_date,
+        last_disbursement_date,
         disburse_bank_trace_id
 ),
 
@@ -638,7 +650,7 @@ select
    -- Disbursement --
    ------------------
     disburse_flag as "Disbursement Flag",
-    disbursement_date as "Disbursement Date",
+    last_disbursement_date as "Last Disbursement Date",
     disburse_bank_trace_id as "Disburse Bank Trace Id"
 
 from invoiced_transactions inv
@@ -646,17 +658,22 @@ from invoiced_transactions inv
     -- if you want to get current product title, replace the next join with: left join products_with_latest_revision p on p.product_id = inv.product_id
     join products_with_history p on p.product_id = inv.product_id and (inv.invoice_date_as_date >= p.valid_from  and inv.invoice_date_as_date < p.valid_to)
 
+
+    -- TODO /!\ problem between invoice_date which is < account.valid_from!! -> cannot make it an inner join now
+    --   -> change this when https://code.amazon.com/reviews/CR-52453819 is pushed
     left join accounts_with_history_with_company_name acc_payer on inv.payer_account_id = acc_payer.account_id
                                                                     and (inv.invoice_date_as_date >= acc_payer.valid_from  and inv.invoice_date_as_date < acc_payer.valid_to)
     -- left join because end_user_account_id is nullable (eg if the invoice is originated from a reseller)
     left join accounts_with_history_with_company_name acc_enduser on inv.end_user_account_id = acc_enduser.account_id
                                                                     and (inv.invoice_date_as_date >= acc_enduser.valid_from  and inv.invoice_date_as_date < acc_enduser.valid_to)
 
+    -- TODO left join because agreement feed is not GA yet and not 100% backfilled yet -> will be moved to INNER join after backfill
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
+    -- TODO left join because of the account history bug -> will move to inner join when fixed (and agreements are backfilled)
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
-    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
+    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed (yet, Nimish seeking Legal Approval)
     left join offers_with_history_with_target_type offer on agg.offer_id = offer.offer_id and (inv.invoice_date_as_date >= offer.valid_from  and inv.invoice_date_as_date < offer.valid_to)
 
 )
