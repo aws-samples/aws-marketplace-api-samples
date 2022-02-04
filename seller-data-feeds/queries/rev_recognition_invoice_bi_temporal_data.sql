@@ -658,9 +658,6 @@ from invoiced_transactions inv
     -- if you want to get current product title, replace the next join with: left join products_with_latest_revision p on p.product_id = inv.product_id
     join products_with_history p on p.product_id = inv.product_id and (inv.invoice_date_as_date >= p.valid_from  and inv.invoice_date_as_date < p.valid_to)
 
-
-    -- TODO /!\ problem between invoice_date which is < account.valid_from!! -> cannot make it an inner join now
-    --   -> change this when https://code.amazon.com/reviews/CR-52453819 is pushed
     left join accounts_with_history_with_company_name acc_payer on inv.payer_account_id = acc_payer.account_id
                                                                     and (inv.invoice_date_as_date >= acc_payer.valid_from  and inv.invoice_date_as_date < acc_payer.valid_to)
     -- left join because end_user_account_id is nullable (eg if the invoice is originated from a reseller)
