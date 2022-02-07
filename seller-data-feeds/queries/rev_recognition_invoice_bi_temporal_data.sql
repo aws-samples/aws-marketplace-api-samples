@@ -180,8 +180,8 @@ offer_targets_with_uni_temporal_data as (
 
 offers_with_history_with_target_type as (
     select
-        off.offer_id,
-        off.offer_revision,
+        offer.offer_id,
+        offer.offer_revision,
         -- even though today it is not possible to combine several types of targeting in a single offer, let's ensure the query is still predictable if this gets possible in the future
         max(
             distinct
@@ -194,26 +194,26 @@ offers_with_history_with_target_type as (
                 else 'Other Targeting'
             end
         ) as offer_target,
-        min(off.name) as name,
-        off.valid_from,
-        off.valid_to
+        min(offer.name) as name,
+        offer.valid_from,
+        offer.valid_to
     from
-        offers_with_history off
+        offers_with_history offer
         -- left joining because public offers don't have targets
-        left join offer_targets_with_uni_temporal_data off_tgt on off.offer_id=off_tgt.offer_id and off.offer_revision=off_tgt.offer_revision
+        left join offer_targets_with_uni_temporal_data off_tgt on offer.offer_id=off_tgt.offer_id and offer.offer_revision=off_tgt.offer_revision
     group by
-        off.offer_id,
-        off.offer_revision,
+        offer.offer_id,
+        offer.offer_revision,
         --redundant with offer_revision, as each revision has a dedicated valid_from/valid_to (but cleaner in the group by)
-        off.valid_from,
-        off.valid_to
+        offer.valid_from,
+        offer.valid_to
 ),
 -- provided for reference only if you are interested into get "current" offer targets
 --  (ie. not used afterwards)
 offers_with_latest_revision_with_target_type as (
     select
-        off.offer_id,
-        off.offer_revision,
+        offer.offer_id,
+        offer.offer_revision,
         -- even though today it is not possible to combine several types of targeting in a single offer, let's ensure the query is still predictable if this gets possible in the future
         max(
             distinct
@@ -226,19 +226,19 @@ offers_with_latest_revision_with_target_type as (
                 else 'Other Targeting'
             end
         ) as offer_target,
-        min(off.name) as name,
-        off.valid_from,
-        off.valid_to
+        min(offer.name) as name,
+        offer.valid_from,
+        offer.valid_to
     from
-        offers_with_latest_revision off
+        offers_with_latest_revision offer
         -- left joining because public offers don't have targets
-        left join offer_targets_with_uni_temporal_data off_tgt on off.offer_id=off_tgt.offer_id and off.offer_revision=off_tgt.offer_revision
+        left join offer_targets_with_uni_temporal_data off_tgt on offer.offer_id=off_tgt.offer_id and offer.offer_revision=off_tgt.offer_revision
     group by
-        off.offer_id,
-        off.offer_revision,
+        offer.offer_id,
+        offer.offer_revision,
         -- redundant with offer_revision, as each revision has a dedicated valid_from (but cleaner in the group by)
-        off.valid_from,
-        off.valid_to
+        offer.valid_from,
+        offer.valid_to
 ),
 
 
@@ -326,6 +326,7 @@ accounts_with_history_with_company_name as (
         acc.aws_account_id,
         acc.encrypted_account_id,
         pii.company_name,
+        pii.email_domain,
         acc.valid_from,
         acc.valid_to
     from accounts_with_history acc
@@ -337,7 +338,7 @@ accounts_with_history_with_company_name as (
 -- A given billing_event_id represents an accounting event and thus has only one valid_from date,
 --   but because of bi-temporality, a billing_event_id (+ its valid_from) can appear multiple times with a different update_date.
 -- We are only interested in the most recent tuple (ie, uni-temporal model)
-invoiced_billing_events_with_uni_temporal_data as (
+billing_events_with_uni_temporal_data as (
     select
         *
     from
@@ -351,6 +352,8 @@ invoiced_billing_events_with_uni_temporal_data as (
             invoice_date,
             transaction_type,
             transaction_reference_id,
+            parent_billing_event_id,
+            bank_trace_id,
             product_id,
             disbursement_billing_event_id,
             action,
@@ -369,10 +372,6 @@ invoiced_billing_events_with_uni_temporal_data as (
             ROW_NUMBER() OVER (PARTITION BY billing_event_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
         from
             billingeventfeed_v1
-        where
-            -- for revenue recognition at invoice time, we are only interested at invoiced and forgiven records
-            --  (ie, disbursements are skipped)
-            action in ('FORGIVEN', 'INVOICED')
     )
     where
         -- keep latest ...
@@ -380,6 +379,51 @@ invoiced_billing_events_with_uni_temporal_data as (
         -- ... and remove the soft-deleted one.
         and (delete_date is null or delete_date = '')
 ),
+-- for revenue recognition at invoice time, we are only interested at invoiced and forgiven records
+--  (ie, disbursements are skipped)
+invoiced_billing_events_with_uni_temporal_data as (
+    select *
+    from billing_events_with_uni_temporal_data
+    where action in ('FORGIVEN', 'INVOICED')
+),
+-- Get billing event id for 'DISBURSEMENT'
+disbursement_events as (
+      select
+        billing_events_raw.billing_event_id as disbursement_id,
+        billing_events_raw.invoice_date as disbursement_date,
+        billing_events_raw.bank_trace_id
+      from
+        billing_events_with_uni_temporal_data billing_events_raw
+      where
+        -- we're only interested in disbursements, so we filter non-disbursements by selecting transaction type to be DISBURSEMENT
+        billing_events_raw.transaction_type = 'DISBURSEMENT'
+    ),
+
+-- Get the invoices along with the line items that are part of the above filtered disbursements
+disbursed_line_items as (
+  select
+    line_items.billing_event_id,
+    line_items.transaction_reference_id,
+    line_items.parent_billing_event_id,
+    line_items.product_id,
+    line_items.transaction_type,
+    line_items.amount,
+    --Currently, partial payment is not allowed, but will be available in future, this is to identify per billing_event_id, how much has been disbursed in total
+    sum(line_items.amount) over (partition by line_items.parent_billing_event_id) disbursed_amount_per_parent,
+    --Similarly, when partial payment is implemented, this will catch the most recent date of disbursement
+    --Note: format is subject to change when partial payment is implemented as we are also planning to show all previous disbursed dates if a billing_event_id is disbursed for more than 1 time
+    max(disbursements.disbursement_date) over (partition by line_items.parent_billing_event_id) last_disbursement_date,
+    disbursements.disbursement_id,
+    disbursements.bank_trace_id
+  from
+    billing_events_with_uni_temporal_data line_items
+    -- Each disbursed line item is linked to the parent disbursement via the disbursement_billing_event_id
+    join disbursement_events disbursements on disbursements.disbursement_id = line_items.disbursement_billing_event_id
+  where
+    -- we are interested only in the invoice line items that are DISBURSED
+    line_items.action = 'DISBURSED'
+),
+
  -- Here we select the account_id of the current seller (We identify this by looking for the to_account_id related to revenue transactions).
  -- We will use it later to distinguish own agreements from agreements generated by channel partners.
  seller_account as (
@@ -388,19 +432,84 @@ invoiced_billing_events_with_uni_temporal_data as (
      from
          invoiced_billing_events_with_uni_temporal_data bill
      where
-         bill.transaction_type like 'AWS_REV_SHARE' and amount < 0 and action = 'INVOICED'
+        -- Assumption here is only seller will pay listing fee. As of 12/21/2021, there are cases that Channel partner have 0 listing fee for CPPO, so the amount could be 0.
+         bill.transaction_type like 'AWS_REV_SHARE' and amount <= 0 and action = 'INVOICED'
      group by
          -- from_account_id is always the same for all those "listing fee" transactions == the seller of record himself.
          -- If this view returns more than 1 record, the overall query will fail (on purpose). Please contact AWS Marketplace if this happens.
          from_account_id
  ),
+--Join invoiced_item with disbursement_item to find out if the invoice has been disbursed
+--'DISBURSED' action does not have 'AWS_TAX_SHARE' AND 'AWS_TAX_SHARE_REFUND' transaction_type, therefore, for billing_event_id with 'AWS_TAX_SHARE' AND 'AWS_TAX_SHARE_REFUND' transaction_type, we can't identify if it has been disbursed.
+--Will unify disburse_flag based on invoice_id next step.
+invoiced_line_items_with_disbursement_info  as(
+    select invoice.*,
+    case
+        when disburse.parent_billing_event_id is not null and - disburse.disbursed_amount_per_parent = invoice.amount then 'Yes'
+        when disburse.parent_billing_event_id is not null and - disburse.disbursed_amount_per_parent <> invoice.amount then 'Partial'
+        else 'No'
+    end as disburse_flag_temp,
+    disburse.last_disbursement_date,
+    - disburse.disbursed_amount_per_parent disburse_amount,
+    disburse.bank_trace_id disburse_bank_trace_id
+    from
+        invoiced_billing_events_with_uni_temporal_data invoice
+    left join
+        (select distinct parent_billing_event_id, disbursed_amount_per_parent, last_disbursement_date, bank_trace_id from disbursed_line_items )disburse on invoice.billing_event_id = disburse.parent_billing_event_id),
+
+--unify disburse_flag across invoice_id
+invoiced_disbursed_disburse_flag_invoice_unified as(
+    select  invoice_item.billing_event_id,
+            invoice_item.valid_from,
+            invoice_item.update_date,
+            invoice_item.delete_date,
+            invoice_item.invoice_date_as_date,
+            invoice_item.invoice_date,
+            invoice_item.transaction_type,
+            invoice_item.transaction_reference_id,
+            invoice_item.parent_billing_event_id,
+            invoice_item.bank_trace_id,
+            invoice_item.product_id,
+            invoice_item.disbursement_billing_event_id,
+            invoice_item.action,
+            invoice_item.from_account_id,
+            invoice_item.to_account_id,
+            invoice_item.end_user_account_id,
+            invoice_item.billing_address_id,
+            invoice_item.amount,
+            disbursed_item.disburse_amount,
+            invoice_item.currency,
+            invoice_item.agreement_id,
+            invoice_item.invoice_id,
+            invoice_item.payment_due_date,
+            invoice_item.usage_period_start_date,
+            invoice_item.usage_period_end_date,
+           case
+               when disbursed_item.invoice_id is null then 'No'
+               when disbursed_item.disburse_flag_temp = 'Partial' then 'Partial'
+               else 'Yes'
+           end as disburse_flag,
+           disbursed_item.last_disbursement_date,
+           disbursed_item.disburse_bank_trace_id as disburse_bank_trace_id
+    from
+        invoiced_line_items_with_disbursement_info invoice_item
+    left join
+        (select distinct invoice_id,
+                last_disbursement_date,
+                disburse_bank_trace_id,
+                disburse_amount,
+                disburse_flag_temp
+            from invoiced_line_items_with_disbursement_info
+            where disburse_flag_temp in ('Yes','Partial') ) disbursed_item
+        on invoice_item.invoice_id = disbursed_item.invoice_id
+),
 invoiced_transactions as (
-    select
+  select
         currency,
         -- We are separating Revenue and Cost of Goods Sold below:
         --  customer invoiced seller_rev_share records expose from_account_id=<customer> to_account_id=Seller
         --  while COGS records expose from_account_id=Seller to_account_id=<manufacturer>
-        sum(case when transaction_type = 'SELLER_REV_SHARE' and  to_account_id =(select seller_account_id from seller_account)   then amount else 0 end) as gross_revenue,
+        sum(case when transaction_type = 'SELLER_REV_SHARE' and  to_account_id =(select seller_account_id from seller_account) then amount else 0 end) as gross_revenue,
         sum(case when transaction_type = 'AWS_REV_SHARE' then amount else 0 end) as aws_rev_share,
         -- _CREDIT is a form of refunds, hence we club those 2 together
         sum(case when transaction_type in ('SELLER_REV_SHARE_REFUND','SELLER_REV_SHARE_CREDIT') and to_account_id =(select seller_account_id from seller_account) then amount else 0 end) as gross_refunds,
@@ -410,13 +519,19 @@ invoiced_transactions as (
         sum(case when transaction_type = 'SELLER_TAX_SHARE' then amount else 0 end) as seller_tax_share,
         sum(case when transaction_type = 'SELLER_TAX_SHARE_REFUND' then amount else 0 end) as seller_tax_share_refund,
         -- NB: the 2 following cost of goods records will be 0 if the seller is not a channel partner
-        sum(case when transaction_type = 'SELLER_REV_SHARE' and from_account_id = (select seller_account_id from seller_account) then amount else 0 end) as cogs,
-        sum(case when transaction_type in ('SELLER_REV_SHARE_REFUND','SELLER_REV_SHARE_CREDIT') and from_account_id = (select seller_account_id from seller_account)  then amount else 0 end) as cogs_refund,
+        --set COGS/COGS refund =0 the when buyer is the seller itself
+        sum(case when transaction_type = 'SELLER_REV_SHARE' and from_account_id = (select seller_account_id from seller_account) and to_account_id <> (select seller_account_id from seller_account) then amount else 0 end) as cogs,
+        sum(case when transaction_type in ('SELLER_REV_SHARE_REFUND','SELLER_REV_SHARE_CREDIT') and from_account_id = (select seller_account_id from seller_account) and to_account_id <> (select seller_account_id from seller_account)  then amount else 0 end) as cogs_refund,
         agreement_id,
         product_id,
         invoice_date_as_date,
         invoice_date,
         invoice_id,
+        transaction_reference_id,
+        disburse_amount,
+        disburse_flag,
+        last_disbursement_date,
+        disburse_bank_trace_id,
         max(
             case
                 -- For AWS and BALANCE_ADJUSTMENT, the billing event feed will show the "AWS Marketplace" account as the
@@ -433,7 +548,7 @@ invoiced_transactions as (
         usage_period_end_date,
         payment_due_date
     from
-        invoiced_billing_events_with_uni_temporal_data
+        invoiced_disbursed_disburse_flag_invoice_unified
     group by
         product_id,
         invoice_date,
@@ -445,7 +560,12 @@ invoiced_transactions as (
         usage_period_start_date,
         usage_period_end_date,
         -- will always have same value given above grouping fields -> cleaner to group by in here rather than using a max or min in the select
-        payment_due_date
+        payment_due_date,
+        transaction_reference_id,
+        disburse_amount,
+        disburse_flag,
+        last_disbursement_date,
+        disburse_bank_trace_id
 ),
 
 revenue_recognition_at_invoice_time as (
@@ -454,13 +574,14 @@ select
    -------------------
    -- Customer Info --
    -------------------
-
    acc_payer.aws_account_id as "Payer AWS Account ID",
    -- payer company name at time of invoice
    acc_payer.company_name as "Payer Company Name",
+   acc_payer.email_domain as "Payer Email Domain",
    acc_enduser.aws_account_id as "End User AWS Account ID",
    -- end user company name at time of invoice
    acc_enduser.company_name as "End User Company Name",
+   acc_enduser.email_domain as "End User Email Domain",
    acc_enduser.encrypted_account_id as "End User Encrypted Account ID",
 
    ------------------
@@ -473,11 +594,11 @@ select
    ----------------------
    -- Procurement Info --
    ----------------------
-   off.offer_id as "Offer ID",
+   offer.offer_id as "Offer ID",
    -- offer name at time of invoice. It is possible that the name changes over time therefore there may be multiple offer names mapped to a single offer id.
-   off.name as "Offer Name",
+   offer.name as "Offer Name",
    -- offer target at time of invoice.
-   off.offer_target as "Offer Target",
+   offer.offer_target as "Offer Target",
    -- We used a sub-select to fail the query if it returns more than 1 record (to be on the safe side)
    case when agg.proposer_account_id <> (select seller_account_id from seller_account) then acc_reseller.aws_account_id else null end as "Reseller AWS Account ID",
    -- reseller company name at time of invoice
@@ -493,6 +614,7 @@ select
    -- Revenues --
    --------------
    inv.invoice_id as "Invoice ID",
+   inv.transaction_reference_id as "Transaction Reference ID",
    inv.invoice_date as "Invoice Date",
    inv.usage_period_start_date as "Usage Period Start Date",
    inv.usage_period_end_date as "Usage Period End Date",
@@ -512,14 +634,25 @@ select
    round(inv.cogs,2) as "COGS",
    round(inv.cogs_refund,2) as "COGS Refund",
    -- summing rounded amounts to ensure that the calculation is consistent between above figures and this one
+   -- net revenue = gross revenue - listing fee - tax - cogs
    (    round(inv.gross_revenue,2) +
         round(inv.aws_rev_share,2) +
         round(inv.gross_refunds,2) +
         round(inv.aws_refund_share,2) +
         round(inv.seller_tax_share,2) +
-        round(inv.seller_tax_share_refund,2)
+        round(inv.seller_tax_share_refund,2) +
+        round(inv.cogs,2) +
+        round(inv.cogs_refund,2)
    ) as "Seller Net Revenue",
-   currency as "Currency"
+   currency as "Currency",
+
+   ------------------
+   -- Disbursement --
+   ------------------
+    disburse_flag as "Disbursement Flag",
+    last_disbursement_date as "Last Disbursement Date",
+    disburse_bank_trace_id as "Disburse Bank Trace Id"
+
 from invoiced_transactions inv
 
     -- if you want to get current product title, replace the next join with: left join products_with_latest_revision p on p.product_id = inv.product_id
@@ -534,11 +667,14 @@ from invoiced_transactions inv
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
-    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
-    left join offers_with_history_with_target_type off on agg.offer_id = off.offer_id and (inv.invoice_date_as_date >= off.valid_from  and inv.invoice_date_as_date < off.valid_to)
+    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed (yet, Nimish seeking Legal Approval)
+    left join offers_with_history_with_target_type offer on agg.offer_id = offer.offer_id and (inv.invoice_date_as_date >= offer.valid_from  and inv.invoice_date_as_date < offer.valid_to)
 
 )
-select * from revenue_recognition_at_invoice_time
+select *
+from revenue_recognition_at_invoice_time
+-- Filter results to within a 90 trailing period
+where cast(date_parse("Invoice Date",'%Y-%m-%dT%H:%i:%SZ') as date) > date_add('DAY', -90, current_date)
 -- To filter on a specific month, uncomment the following and replace the dates:
--- where "Invoice Date" between '2021-04-01' and '2021-04-30'
+-- where "Invoice Date" >= '2021-08-01' and "Invoice Date"< '2021-10-15'
