@@ -72,7 +72,6 @@ agreements_with_uni_temporal_data as (
             *,
             ROW_NUMBER() OVER (PARTITION BY agreement_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
         from
-            -- TODO change to agreementfeed_v1 when Agreement Feed is GA'ed
             agreementfeed
     )
     where
@@ -88,6 +87,7 @@ agreements_with_history as (
         agreement_id,
         origin_offer_id as offer_id,
         proposer_account_id,
+        acceptor_account_id,
         agreement_revision,
         start_date,
         end_date,
@@ -128,6 +128,8 @@ offers_with_history as (
         offer_id,
         offer_revision,
         name,
+        opportunity_name,
+        opportunity_description,
         from_iso8601_timestamp(valid_from) as valid_from,
         coalesce(
             lead(from_iso8601_timestamp(valid_from)) over (partition by offer_id order by from_iso8601_timestamp(valid_from) asc),
@@ -146,6 +148,8 @@ offers_with_latest_revision as (
             offer_id,
             offer_revision,
             name,
+            opportunity_name,
+            opportunity_description,
             valid_from,
             null valid_to,
             ROW_NUMBER() OVER (PARTITION BY offer_id ORDER BY from_iso8601_timestamp(valid_from) desc) as row_num_latest_revision
@@ -195,6 +199,8 @@ offers_with_history_with_target_type as (
             end
         ) as offer_target,
         min(offer.name) as name,
+        min(offer.opportunity_name) as opportunity_name,
+        min(offer.opportunity_description) as opportunity_description,
         offer.valid_from,
         offer.valid_to
     from
@@ -227,6 +233,8 @@ offers_with_latest_revision_with_target_type as (
             end
         ) as offer_target,
         min(offer.name) as name,
+        min(offer.opportunity_name) as opportunity_name,
+        min(offer.opportunity_description) as opportunity_description,
         offer.valid_from,
         offer.valid_to
     from
@@ -272,6 +280,7 @@ accounts_with_history as (
         substring('000000000000'||cast(aws_account_id as varchar),-12) aws_account_id,
         encrypted_account_id,
         mailing_address_id,
+        tax_address_id,
         from_iso8601_timestamp(valid_from) as valid_from,
         coalesce(
             lead(from_iso8601_timestamp(valid_from)) over (partition by account_id order by from_iso8601_timestamp(valid_from) asc),
@@ -319,19 +328,21 @@ pii_with_latest_revision as (
         row_num_latest_revision = 1
 ),
 
--- enrich each account history record with company name from mailing_address
+-- enrich each account history record
 accounts_with_history_with_company_name as (
     select
         acc.account_id,
         acc.aws_account_id,
         acc.encrypted_account_id,
-        pii.company_name,
-        pii.email_domain,
+        acc.mailing_address_id,
+        acc.tax_address_id,
+        pii_mailing.company_name as mailing_company_name,
+        pii_mailing.email_domain,
         acc.valid_from,
         acc.valid_to
     from accounts_with_history acc
     -- left join because mailing_address_id can be null but when exists
-    left join pii_with_latest_revision pii on acc.mailing_address_id=pii.address_id
+    left join pii_with_latest_revision pii_mailing on acc.mailing_address_id=pii_mailing.address_id
 ),
 
 
@@ -354,6 +365,8 @@ billing_events_with_uni_temporal_data as (
             transaction_reference_id,
             parent_billing_event_id,
             bank_trace_id,
+            --As broker_id has not been backfilled, manually fill up this column
+            case when broker_id is null or broker_id = '' then 'AWS_INC' else broker_id end as broker_id,
             product_id,
             disbursement_billing_event_id,
             action,
@@ -459,51 +472,50 @@ invoiced_line_items_with_disbursement_info  as(
 
 --unify disburse_flag across invoice_id
 invoiced_disbursed_disburse_flag_invoice_unified as(
-    select  invoice_item.billing_event_id,
-            invoice_item.valid_from,
-            invoice_item.update_date,
-            invoice_item.delete_date,
-            invoice_item.invoice_date_as_date,
-            invoice_item.invoice_date,
-            invoice_item.transaction_type,
-            invoice_item.transaction_reference_id,
-            invoice_item.parent_billing_event_id,
-            invoice_item.bank_trace_id,
-            invoice_item.product_id,
-            invoice_item.disbursement_billing_event_id,
-            invoice_item.action,
-            invoice_item.from_account_id,
-            invoice_item.to_account_id,
-            invoice_item.end_user_account_id,
-            invoice_item.billing_address_id,
-            invoice_item.amount,
-            disbursed_item.disburse_amount,
-            invoice_item.currency,
-            invoice_item.agreement_id,
-            invoice_item.invoice_id,
-            invoice_item.payment_due_date,
-            invoice_item.usage_period_start_date,
-            invoice_item.usage_period_end_date,
+    select invoice_item.billing_event_id,
+           invoice_item.valid_from,
+           invoice_item.update_date,
+           invoice_item.delete_date,
+           invoice_item.invoice_date_as_date,
+           invoice_item.invoice_date,
+           invoice_item.transaction_type,
+           invoice_item.transaction_reference_id,
+           invoice_item.parent_billing_event_id,
+           invoice_item.bank_trace_id,
+           invoice_item.broker_id,
+           invoice_item.product_id,
+           invoice_item.disbursement_billing_event_id,
+           invoice_item.action,
+           invoice_item.from_account_id,
+           invoice_item.to_account_id,
+           invoice_item.end_user_account_id,
+           invoice_item.billing_address_id,
+           invoice_item.amount,
+           invoice_item.currency,
+           invoice_item.agreement_id,
+           invoice_item.invoice_id,
+           invoice_item.payment_due_date,
+           invoice_item.usage_period_start_date,
+           invoice_item.usage_period_end_date,
            case
                when disbursed_item.invoice_id is null then 'No'
                when disbursed_item.disburse_flag_temp = 'Partial' then 'Partial'
                else 'Yes'
            end as disburse_flag,
            disbursed_item.last_disbursement_date,
-           disbursed_item.disburse_bank_trace_id as disburse_bank_trace_id
+           disbursed_item.disburse_bank_trace_id
     from
         invoiced_line_items_with_disbursement_info invoice_item
     left join
         (select distinct invoice_id,
-                last_disbursement_date,
+                disburse_flag_temp,
                 disburse_bank_trace_id,
-                disburse_amount,
-                disburse_flag_temp
+                last_disbursement_date
             from invoiced_line_items_with_disbursement_info
             where disburse_flag_temp in ('Yes','Partial') ) disbursed_item
         on invoice_item.invoice_id = disbursed_item.invoice_id
 ),
-invoiced_transactions as (
+invoiced_transactions_disbursed_disburse_flag_invoice_unified as (
   select
         currency,
         -- We are separating Revenue and Cost of Goods Sold below:
@@ -527,8 +539,8 @@ invoiced_transactions as (
         invoice_date_as_date,
         invoice_date,
         invoice_id,
+        broker_id,
         transaction_reference_id,
-        disburse_amount,
         disburse_flag,
         last_disbursement_date,
         disburse_bank_trace_id,
@@ -543,6 +555,9 @@ invoiced_transactions as (
                 else from_account_id
             end
         ) as payer_account_id,
+        -- A transaction will have the same billing_address_id for all of its line items.
+         --Note: Currently, only transaction_type like 'SELLER_%' have billing_address_id exposed. Make adjustment on the max() selection when billing_address_id of other transaction_types exposed.
+        max(billing_address_id) as billing_address_id,
         end_user_account_id,
         usage_period_start_date,
         usage_period_end_date,
@@ -554,6 +569,7 @@ invoiced_transactions as (
         invoice_date,
         invoice_date_as_date,
         invoice_id,
+        broker_id,
         currency,
         agreement_id,
         end_user_account_id,
@@ -562,10 +578,30 @@ invoiced_transactions as (
         -- will always have same value given above grouping fields -> cleaner to group by in here rather than using a max or min in the select
         payment_due_date,
         transaction_reference_id,
-        disburse_amount,
         disburse_flag,
         last_disbursement_date,
         disburse_bank_trace_id
+),
+
+--add subscriber and payer addressID, payer address preference order: tax address > billing address > mailing address,
+-- subscriber address preference order: tax address >  mailing address
+invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address as (
+  select inv.*, agg.acceptor_account_id subscriber_account_id,
+         coalesce (
+             --empty value in Athena shows as '', change all '' value to null in order to follow the preference order logic above
+             case when acc_acp.tax_address_id ='' then null else acc_acp.tax_address_id end,
+             case when acc_acp.mailing_address_id = '' then null else acc_acp.mailing_address_id end) as subscriber_address_id,
+         coalesce (
+             case when acc_pay.tax_address_id = '' then null else acc_pay.tax_address_id end,
+             case when inv.billing_address_id = '' then null else inv.billing_address_id end,
+             case when acc_pay.mailing_address_id = '' then null else acc_pay.mailing_address_id end) as payer_address_id
+  from invoiced_transactions_disbursed_disburse_flag_invoice_unified inv
+  left join agreements_with_history agg on inv.agreement_id = agg.agreement_id
+                                               and (inv.invoice_date_as_date >= agg.valid_from and inv.invoice_date_as_date < agg.valid_to)
+  left join accounts_with_history_with_company_name acc_acp on agg.acceptor_account_id = acc_acp.account_id
+                                               and (inv.invoice_date_as_date >= acc_acp.valid_from  and inv.invoice_date_as_date < acc_acp.valid_to)
+  left join accounts_with_history_with_company_name acc_pay on inv.payer_account_id = acc_pay.account_id
+                                               and (inv.invoice_date_as_date >= acc_pay.valid_from  and inv.invoice_date_as_date < acc_pay.valid_to)
 ),
 
 revenue_recognition_at_invoice_time as (
@@ -576,13 +612,22 @@ select
    -------------------
    acc_payer.aws_account_id as "Payer AWS Account ID",
    -- payer company name at time of invoice
-   acc_payer.company_name as "Payer Company Name",
-   acc_payer.email_domain as "Payer Email Domain",
+   pii_payer.company_name as "Payer Company Name",
+   pii_payer.email_domain as "Payer Email Domain",
+   pii_payer.city as "Payer City",
+   pii_payer.state_or_region as "Payer State",
+   pii_payer.country as "Payer Country",
+   pii_payer.postal_code as "Payer Postal Code",
    acc_enduser.aws_account_id as "End User AWS Account ID",
    -- end user company name at time of invoice
-   acc_enduser.company_name as "End User Company Name",
+   acc_enduser.mailing_company_name as "End User Company Name",
    acc_enduser.email_domain as "End User Email Domain",
    acc_enduser.encrypted_account_id as "End User Encrypted Account ID",
+   pii_subscriber.email_domain as "Subscriber Email Domain",
+   pii_subscriber.city as "Subscriber City",
+   pii_subscriber.state_or_region as "Subscriber State",
+   pii_subscriber.country as "Subscriber Country",
+   pii_subscriber.postal_code as "Subscriber Postal Code",
 
    ------------------
    -- Product Info --
@@ -599,10 +644,12 @@ select
    offer.name as "Offer Name",
    -- offer target at time of invoice.
    offer.offer_target as "Offer Target",
+   offer.opportunity_name as "Offer opportunity Name",
+   offer.opportunity_description as "Offer opportunity Description",
    -- We used a sub-select to fail the query if it returns more than 1 record (to be on the safe side)
    case when agg.proposer_account_id <> (select seller_account_id from seller_account) then acc_reseller.aws_account_id else null end as "Reseller AWS Account ID",
    -- reseller company name at time of invoice
-   case when agg.proposer_account_id <> (select seller_account_id from seller_account ) then  acc_reseller.company_name else null end "Reseller Company Name",
+   case when agg.proposer_account_id <> (select seller_account_id from seller_account ) then  acc_reseller.mailing_company_name else null end "Reseller Company Name",
    agg.agreement_id as "Agreement ID",
    -- all agreement related data are surfaced as they were at time of invoice.
    agg.agreement_revision as "Agreement Revision",
@@ -650,25 +697,26 @@ select
    -- Disbursement --
    ------------------
     disburse_flag as "Disbursement Flag",
-    last_disbursement_date as "Last Disbursement Date",
-    disburse_bank_trace_id as "Disburse Bank Trace Id"
+    -- 'no value' cells in all data feeds show as 'empty string' in Athena, change the possible NULL values generated from previous left join to unify those columns with no value as ''
+    case when last_disbursement_date is null then '' else last_disbursement_date end as "Last Disbursement Date",
+    case when disburse_bank_trace_id is null then '' else disburse_bank_trace_id end as "Disburse Bank Trace Id",
+    broker_id as "Broker ID"
 
-from invoiced_transactions inv
+from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
 
     -- if you want to get current product title, replace the next join with: left join products_with_latest_revision p on p.product_id = inv.product_id
     join products_with_history p on p.product_id = inv.product_id and (inv.invoice_date_as_date >= p.valid_from  and inv.invoice_date_as_date < p.valid_to)
-
     left join accounts_with_history_with_company_name acc_payer on inv.payer_account_id = acc_payer.account_id
                                                                     and (inv.invoice_date_as_date >= acc_payer.valid_from  and inv.invoice_date_as_date < acc_payer.valid_to)
     -- left join because end_user_account_id is nullable (eg if the invoice is originated from a reseller)
     left join accounts_with_history_with_company_name acc_enduser on inv.end_user_account_id = acc_enduser.account_id
                                                                     and (inv.invoice_date_as_date >= acc_enduser.valid_from  and inv.invoice_date_as_date < acc_enduser.valid_to)
-
+    left join pii_with_latest_revision pii_payer on inv.payer_address_id = pii_payer.address_id
+    left join pii_with_latest_revision pii_subscriber on inv.subscriber_address_id = pii_subscriber.address_id
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
-    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed (yet, Nimish seeking Legal Approval)
     left join offers_with_history_with_target_type offer on agg.offer_id = offer.offer_id and (inv.invoice_date_as_date >= offer.valid_from  and inv.invoice_date_as_date < offer.valid_to)
 
 )
