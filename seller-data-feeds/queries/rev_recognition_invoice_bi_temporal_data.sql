@@ -594,7 +594,11 @@ invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address as (
          coalesce (
              case when acc_pay.tax_address_id = '' then null else acc_pay.tax_address_id end,
              case when inv.billing_address_id = '' then null else inv.billing_address_id end,
-             case when acc_pay.mailing_address_id = '' then null else acc_pay.mailing_address_id end) as payer_address_id
+             case when acc_pay.mailing_address_id = '' then null else acc_pay.mailing_address_id end) as payer_address_id,
+         coalesce (
+             case when acc_end.tax_address_id = '' then null else acc_end.tax_address_id end,
+             case when inv.billing_address_id = '' then null else inv.billing_address_id end,
+             case when acc_end.mailing_address_id = '' then null else acc_end.mailing_address_id end) as end_user_address_id
   from invoiced_transactions_disbursed_disburse_flag_invoice_unified inv
   left join agreements_with_history agg on inv.agreement_id = agg.agreement_id
                                                and (inv.invoice_date_as_date >= agg.valid_from and inv.invoice_date_as_date < agg.valid_to)
@@ -602,32 +606,50 @@ invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address as (
                                                and (inv.invoice_date_as_date >= acc_acp.valid_from  and inv.invoice_date_as_date < acc_acp.valid_to)
   left join accounts_with_history_with_company_name acc_pay on inv.payer_account_id = acc_pay.account_id
                                                and (inv.invoice_date_as_date >= acc_pay.valid_from  and inv.invoice_date_as_date < acc_pay.valid_to)
+  left join accounts_with_history_with_company_name acc_end on inv.end_user_account_id = acc_end.account_id
+                                               and (inv.invoice_date_as_date >= acc_end.valid_from  and inv.invoice_date_as_date < acc_end.valid_to)
 ),
 
+--cppo offer_id has not been backfilled to offertargetfeed_v1 table, causing cppo offer be defined as 'Public' in previous step, we will convert them back to 'Private' in next step
+cppo_offer_id as(
+select distinct agg.offer_id as offer_id
+from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
+left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
+
+except
+select distinct offer_id
+from offer_targets_with_uni_temporal_data
+),
 revenue_recognition_at_invoice_time as (
 
 select
-   -------------------
-   -- Customer Info --
-   -------------------
-   acc_payer.aws_account_id as "Payer AWS Account ID",
-   -- payer company name at time of invoice
-   pii_payer.company_name as "Payer Company Name",
-   pii_payer.email_domain as "Payer Email Domain",
-   pii_payer.city as "Payer City",
-   pii_payer.state_or_region as "Payer State",
-   pii_payer.country as "Payer Country",
-   pii_payer.postal_code as "Payer Postal Code",
-   acc_enduser.aws_account_id as "End User AWS Account ID",
-   -- end user company name at time of invoice
-   acc_enduser.mailing_company_name as "End User Company Name",
-   acc_enduser.email_domain as "End User Email Domain",
-   acc_enduser.encrypted_account_id as "End User Encrypted Account ID",
-   pii_subscriber.email_domain as "Subscriber Email Domain",
-   pii_subscriber.city as "Subscriber City",
-   pii_subscriber.state_or_region as "Subscriber State",
-   pii_subscriber.country as "Subscriber Country",
-   pii_subscriber.postal_code as "Subscriber Postal Code",
+    --Payer Information
+    acc_payer.aws_account_id as "Payer AWS Account ID", -- "Customer AWS Account Number" in legacy report
+    pii_payer.company_name as "Payer Company Name",
+    pii_payer.email_domain as "Payer Email Domain",
+    pii_payer.city as "Payer City",
+    pii_payer.state_or_region as "Payer State",
+    pii_payer.country as "Payer Country",
+    pii_payer.postal_code as "Payer Postal Code",
+
+   --End Customer Information
+    acc_enduser.aws_account_id as "End Customer AWS Account ID",
+    acc_enduser.encrypted_account_id as "End User Encrypted Account ID",
+    pii_end_user.company_name as "End Customer Company Name",
+    pii_end_user.email_domain as "End Customer Email Domain",
+    pii_end_user.city as "End Customer City",
+    pii_end_user.state_or_region as "End Customer State",
+    pii_end_user.country as "End Customer Country",
+    pii_end_user.postal_code as "End Customer Postal Code",
+
+    --Subscriber Information
+    acc_subscriber.aws_account_id as "Subscriber AWS Account ID",
+    pii_subscriber.company_name as "Subscriber Company Name",
+    pii_subscriber.email_domain as "Subscriber Email Domain",
+    pii_subscriber.city as "Subscriber City",
+    pii_subscriber.state_or_region as "Subscriber State",
+    pii_subscriber.country as "Subscriber Country",
+    pii_subscriber.postal_code as "Subscriber Postal Code",
 
    ------------------
    -- Product Info --
@@ -643,7 +665,7 @@ select
    -- offer name at time of invoice. It is possible that the name changes over time therefore there may be multiple offer names mapped to a single offer id.
    offer.name as "Offer Name",
    -- offer target at time of invoice.
-   offer.offer_target as "Offer Target",
+   case when offer.offer_id in (select distinct offer_id from cppo_offer_id) then 'Private' else offer.offer_target end as "Offer Target",
    offer.opportunity_name as "Offer opportunity Name",
    offer.opportunity_description as "Offer opportunity Description",
    -- We used a sub-select to fail the query if it returns more than 1 record (to be on the safe side)
@@ -711,8 +733,11 @@ from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
     -- left join because end_user_account_id is nullable (eg if the invoice is originated from a reseller)
     left join accounts_with_history_with_company_name acc_enduser on inv.end_user_account_id = acc_enduser.account_id
                                                                     and (inv.invoice_date_as_date >= acc_enduser.valid_from  and inv.invoice_date_as_date < acc_enduser.valid_to)
+    left join accounts_with_history_with_company_name acc_subscriber on inv.subscriber_account_id = acc_subscriber.account_id
+                                                                    and (inv.invoice_date_as_date >= acc_subscriber.valid_from  and inv.invoice_date_as_date < acc_subscriber.valid_to)
     left join pii_with_latest_revision pii_payer on inv.payer_address_id = pii_payer.address_id
     left join pii_with_latest_revision pii_subscriber on inv.subscriber_address_id = pii_subscriber.address_id
+    left join pii_with_latest_revision pii_end_user on inv.end_user_address_id = pii_end_user.address_id
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
