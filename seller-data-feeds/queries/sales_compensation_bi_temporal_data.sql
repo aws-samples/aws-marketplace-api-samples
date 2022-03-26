@@ -1,4 +1,4 @@
-    -- General note: When executing this query we are assuming that the data ingested in the database is using
+       -- General note: When executing this query we are assuming that the data ingested in the database is using
     -- two time axes (the valid_from column and the update_date column).
     -- See documentation for more details: https://docs.aws.amazon.com/marketplace/latest/userguide/data-feed.html#data-feed-details
 
@@ -41,6 +41,109 @@
       row_num_latest_revision = 1
    ),
 
+      -- An offer_id has several valid_from dates (each representing an offer revision)
+--   but because of bi-temporality, an offer_id + valid_from tuple can appear multiple times with a different update_date.
+-- We are only interested in the most recent tuple (ie, uni-temporal model)
+offers_with_uni_temporal_data as (
+    select
+        *
+    from
+    (
+        select
+            *,
+            ROW_NUMBER() OVER (PARTITION BY offer_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
+        from
+            offerfeed_v1
+    )
+    where
+        -- keep latest ...
+        row_num = 1
+        -- ... and remove the soft-deleted one.
+        and (delete_date is null or delete_date = '')
+),
+-- Here, we build the validity time range (adding valid_to on top of valid_from) of each offer revision.
+-- We will use it to get Offer name at invoice time.
+-- NB: If you'd rather get "current" offer name, un-comment "offers_with_latest_revision"
+offers_with_history as (
+    select
+        offer_id,
+        offer_revision,
+        name,
+        opportunity_id,
+        opportunity_name,
+        opportunity_description,
+        from_iso8601_timestamp(valid_from) as valid_from,
+        coalesce(
+            lead(from_iso8601_timestamp(valid_from)) over (partition by offer_id order by from_iso8601_timestamp(valid_from) asc),
+            timestamp '2999-01-01 00:00:00'
+        ) as valid_to
+    from offers_with_uni_temporal_data
+),
+-- provided for reference only if you are interested into get "current" offer name
+--  (ie. not used afterwards)
+offers_with_latest_revision as (
+    select
+        *
+    from
+    (
+        select
+            offer_id,
+            offer_revision,
+            name,
+            opportunity_id,
+            opportunity_name,
+            opportunity_description,
+            valid_from,
+            null valid_to,
+            ROW_NUMBER() OVER (PARTITION BY offer_id ORDER BY from_iso8601_timestamp(valid_from) desc) as row_num_latest_revision
+        from
+         offers_with_uni_temporal_data
+    )
+    where
+        row_num_latest_revision = 1
+),
+
+
+-- An agreement_id has several valid_from dates (each representing an agreement revision)
+--   but because of bi-temporality, an agreement_id + valid_from tuple can appear multiple times with a different update_date.
+-- We are only interested in the most recent tuple (ie, uni-temporal model)
+agreements_with_uni_temporal_data as (
+    select
+        *
+    from
+    (
+        select
+            *,
+            ROW_NUMBER() OVER (PARTITION BY agreement_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
+        from
+            -- TODO change to agreementfeed_v1 when Agreement Feed is GA'ed
+            agreementfeed
+    )
+    where
+        -- keep latest ...
+        row_num = 1
+        -- ... and remove the soft-deleted one.
+        and (delete_date is null or delete_date = '')
+),
+-- Here, we build the validity time range (adding valid_to on top of valid_from) of each agreement revision.
+-- We will use it to get agreement metadata at invoice time.
+agreements_with_history as (
+    select
+        agreement_id,
+        origin_offer_id as offer_id,
+        proposer_account_id,
+        acceptor_account_id,
+        agreement_revision,
+        start_date,
+        end_date,
+        acceptance_date,
+        from_iso8601_timestamp(valid_from) as valid_from,
+        coalesce(
+            lead(from_iso8601_timestamp(valid_from)) over (partition by agreement_id order by from_iso8601_timestamp(valid_from) asc),
+            timestamp '2999-01-01 00:00:00'
+        ) as valid_to
+    from agreements_with_uni_temporal_data
+),
    -- Let's get all the addresses and keep the latest address_id and valid_from combination
 	 -- We're transitioning from a bi-temporal data model to an uni-temporal data_model
    piifeed_with_uni_temporal_data as (
@@ -149,6 +252,9 @@
           from_account_id,
           to_account_id,
           end_user_account_id,
+          agreement_id,
+          --As broker_id has not been backfilled, manually fill up this column
+  		  case when broker_id is null or broker_id = '' then 'AWS_INC' else broker_id end as broker_id,
           -- convert an empty billing address to null. This will be later used in a COALESCE call
           case
            when billing_address_id <> '' then billing_address_id else null
@@ -161,7 +267,7 @@
           -- The Sales Compensation Report does not contain BALANCE ADJUSTMENTS, so we filter them out here
           transaction_type <> 'BALANCE_ADJUSTMENT'
           -- Keep the transactions that will affect any future disbursed amounts
-          and balance_impacting = '1'
+          and balance_impacting = 1
         )
       where row_num = 1
         -- ... and remove the soft-deleted one.
@@ -197,13 +303,14 @@
     select
       transaction_reference_id,
       product_id,
-      -- A transaction will have the same invoice date for all of its line items (transaction types)
-      max(invoice_date) as invoice_date,
+      billing.agreement_id,
+      broker_id,
+      invoice_date,
       -- A transaction will have the same billing_address_id for all of its line items. Remember that the billing event
       -- is uni temporal and we retrieved only the latest valid_from item
+      --Note: Currently, only transaction_type like 'SELLER_%' have billing_address_id exposed. Make adjustment on the max() selection when billing_address_id of other transaction_types exposed.
       max(billing_address_id) as billing_address_id,
-      --  A transaction will have the same currency for all of its line items
-      max(currency) as currency,
+      currency,
       -- We're building a pivot table in order to provide all the data related to a transaction in a single row
       sum(case when transaction_type = 'SELLER_REV_SHARE' then invoice_amount else 0 end) as seller_rev_share,
       sum(case when transaction_type = 'AWS_REV_SHARE' then invoice_amount else 0 end) as aws_rev_share,
@@ -221,18 +328,30 @@
         when
          transaction_type not like '%AWS%' and transaction_type not like 'BALANCE_ADJUSTMENT' then from_account_id
        end) as payer_account_id,
+      offer.opportunity_id,
       -- this is the account that used your product (can be same as the one who subscribed if the license was not distributed but used directly)
-      end_user_account_id as customer_account_id
+      end_user_account_id as customer_account_id,
+      -- this is the account that is in the agreement
+      agg.acceptor_account_id as subscriber_account_id
     from
-      billing_events_with_uni_temporal_data
+      billing_events_with_uni_temporal_data billing
+      left join agreements_with_history agg on billing.agreement_id = agg.agreement_id
+           and (billing.invoice_date >= agg.valid_from and billing.invoice_date < agg.valid_to)
+      left join offers_with_history offer on agg.offer_id = offer.offer_id and (billing.invoice_date >= offer.valid_from  and billing.invoice_date < offer.valid_to)
     where
       -- we only care for invoiced or forgiven items. disbursements are not part of the sales compensation report
       action in ('INVOICED', 'FORGIVEN')
     group by
       transaction_reference_id,
       product_id,
+      billing.agreement_id,
+      broker_id,
+      invoice_date,
+      currency,
+      offer.opportunity_id,
       -- there might be different end-users for the same transaction reference id. distributed licenses is an example
-      end_user_account_id
+      end_user_account_id,
+      agg.acceptor_account_id
 ),
 
 invoiced_items_with_product_and_billing_address as (
@@ -243,6 +362,10 @@ invoiced_items_with_product_and_billing_address as (
     payer_info.aws_account_id as payer_aws_account_id,
     payer_info.account_id as payer_reference_id,
     customer_info.aws_account_id as end_user_aws_account_id,
+    subscriber_info.aws_account_id as subscriber_aws_account_id,
+    coalesce (
+             case when subscriber_info.tax_address_id ='' then null else subscriber_info.tax_address_id end,
+             case when subscriber_info.mailing_address_id = '' then null else subscriber_info.mailing_address_id end) as subscriber_address_id,
     (
         invoice_amounts.seller_rev_share +
         invoice_amounts.aws_rev_share +
@@ -253,11 +376,16 @@ invoiced_items_with_product_and_billing_address as (
         invoice_amounts.seller_tax_share +
         invoice_amounts.seller_tax_refund
     ) as seller_net_revenue,
-    -- Try to get the billing address from the DISBURSED event (if any)
-    -- If there is no DISBURSEMENT, get the billing address from the INVOICED item
-    -- If still no billing address, then default to getting the mailing address of the payer
-    coalesce(billing_add.billing_address_id, invoice_amounts.billing_address_id, payer_info.mailing_address_id) as final_billing_address_id
-  from
+    coalesce (
+             case when payer_info.tax_address_id ='' then null else payer_info.tax_address_id end,
+             case when invoice_amounts.billing_address_id = '' then null else invoice_amounts.billing_address_id end,
+             case when payer_info.mailing_address_id = '' then null else payer_info.mailing_address_id end) as payer_address_id,
+
+          coalesce (
+             case when customer_info.tax_address_id = '' then null else customer_info.tax_address_id end,
+             case when invoice_amounts.billing_address_id = '' then null else invoice_amounts.billing_address_id end,
+             case when customer_info.mailing_address_id = '' then null else customer_info.mailing_address_id end) as end_user_address_id
+    from
     invoiced_and_forgiven_transactions invoice_amounts
     join products_with_latest_revision products on products.product_id = invoice_amounts.product_id
     left join accounts_with_history payer_info on payer_info.account_id = invoice_amounts.payer_account_id
@@ -268,16 +396,39 @@ invoiced_items_with_product_and_billing_address as (
         and customer_info.begin_date <= invoice_amounts.invoice_date and invoice_amounts.invoice_date < customer_info.end_date
     left join billing_addresses_for_disbursed_invoices billing_add on billing_add.transaction_reference_id = invoice_amounts.transaction_reference_id
         and billing_add.from_account_id = invoice_amounts.payer_account_id
+    left join accounts_with_history subscriber_info on subscriber_info.account_id = invoice_amounts.subscriber_account_id
+        and subscriber_info.begin_date <= invoice_amounts.invoice_date and invoice_amounts.invoice_date < subscriber_info.end_date
 ),
 
 invoices_with_full_address as (
   select
+    --Payer info
     payer_aws_account_id as "Payer AWS Account ID", -- "Customer AWS Account Number" in legacy report
-    pii_data.country as "Country",
-    pii_data.state_or_region as "State",
-    pii_data.city as "City",
-    pii_data.postal_code as "Zip Code",
-    pii_data.email_domain as "Email Domain",
+    payer_reference_id as "Payer Reference ID",
+    pii_data.country as "Payer Country",
+    pii_data.state_or_region as "Payer State",
+    pii_data.city as "Payer City",
+    pii_data.postal_code as "Payer Postal Code",
+    pii_data.email_domain as "Payer Email Domain",
+
+   --End Customer Information
+    end_user_aws_account_id as "End Customer AWS Account ID",
+    pii_customer.company_name as "End Customer Company Name",
+    pii_customer.email_domain as "End Customer Email Domain",
+    pii_customer.city as "End Customer City",
+    pii_customer.state_or_region as "End Customer State",
+    pii_customer.country as "End Customer Country",
+    pii_customer.postal_code as "End Customer Postal Code",
+
+    --Subscriber Information
+    subscriber_aws_account_id as "Subscriber AWS Account ID",
+    pii_subscriber.company_name as "Subscriber Company Name",
+    pii_subscriber.email_domain as "Subscriber Email Domain",
+    pii_subscriber.city as "Subscriber City",
+    pii_subscriber.state_or_region as "Subscriber State",
+    pii_subscriber.country as "Subscriber Country",
+    pii_subscriber.postal_code as "Subscriber Postal Code",
+
     product_code as "Product Code",
     title as "Product Title",
     seller_rev_share as "Gross Revenue",
@@ -287,16 +438,21 @@ invoices_with_full_address as (
     seller_net_revenue as "Net Revenue",
     currency as "Currency",
     date_format(invoice_date, '%Y-%m')as "AR Period",
+    invoice_date as "Invoice Date",
     transaction_reference_id as "Transaction Reference ID",
-    payer_reference_id as "Payer Reference ID",
-    end_user_aws_account_id as "End Customer AWS Account ID"
+    broker_id as "Broker ID",
+    offer.opportunity_name as "Opportunity Name",
+    offer.opportunity_description as "Opportunity Description"
   from
     invoiced_items_with_product_and_billing_address invoice_amounts
-    left join pii_with_latest_revision pii_data on pii_data.address_id = invoice_amounts.final_billing_address_id
+    left join pii_with_latest_revision pii_data on pii_data.address_id = invoice_amounts.payer_address_id
+    left join pii_with_latest_revision pii_subscriber on pii_subscriber.address_id = invoice_amounts.subscriber_address_id
+    left join pii_with_latest_revision pii_customer on pii_customer.address_id = invoice_amounts.end_user_address_id
+    left join (select distinct opportunity_id, opportunity_name, opportunity_description from offers_with_history) offer on invoice_amounts.opportunity_id = offer.opportunity_id
     -- Filter out FORGIVEN and Field Demonstration Pricing transactions
     where seller_net_revenue <> 0
 )
 
 select * from invoices_with_full_address
--- To filter on a specific month, uncomment the following and replace the date:
--- where "AR Period" = '2021-04'
+-- Filter results to within a 90 trailing period
+where "Invoice Date" > date_add('DAY', -90, current_date)
