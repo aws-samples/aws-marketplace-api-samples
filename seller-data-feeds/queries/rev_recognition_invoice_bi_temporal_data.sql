@@ -620,11 +620,23 @@ except
 select distinct offer_id
 from offer_targets_with_uni_temporal_data
 ),
+
+--When broker_id is 'AWS_EUROPE',invoice_id of listing fee is different from invoice_id of seller revenue, these 2 invoice_ids are linked through parent_billing_event_id and billing_event_id. Adding column 'VAT invoice ID' to provide the mapping between 2 invoice_ids
+vat_invoice_id_mapping as(
+  select distinct inv.invoice_id, listing.invoice_id as vat_invoice_id
+  from
+    (select billing_event_id, invoice_id from billing_events_with_uni_temporal_data where broker_id = 'AWS_EUROPE') inv
+  left join
+    (select distinct parent_billing_event_id, invoice_id
+     from billing_events_with_uni_temporal_data
+        where broker_id = 'AWS_EUROPE' and action = 'INVOICED' and transaction_type like 'AWS_REV_SHARE%' ) listing on inv.billing_event_id = listing.parent_billing_event_id
+),
 revenue_recognition_at_invoice_time as (
 
 select
     --Payer Information
     acc_payer.aws_account_id as "Payer AWS Account ID", -- "Customer AWS Account Number" in legacy report
+    acc_payer.encrypted_account_id as "Payer Encrypted Account ID",
     pii_payer.company_name as "Payer Company Name",
     pii_payer.email_domain as "Payer Email Domain",
     pii_payer.city as "Payer City",
@@ -644,6 +656,7 @@ select
 
     --Subscriber Information
     acc_subscriber.aws_account_id as "Subscriber AWS Account ID",
+    acc_subscriber.encrypted_account_id as "End User Encrypted Account ID",
     pii_subscriber.company_name as "Subscriber Company Name",
     pii_subscriber.email_domain as "Subscriber Email Domain",
     pii_subscriber.city as "Subscriber City",
@@ -683,6 +696,7 @@ select
    -- Revenues --
    --------------
    inv.invoice_id as "Invoice ID",
+   vat.invoice_id as "Charge Invoice ID",
    inv.transaction_reference_id as "Transaction Reference ID",
    inv.invoice_date as "Invoice Date",
    inv.usage_period_start_date as "Usage Period Start Date",
@@ -743,7 +757,7 @@ from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
     left join offers_with_history_with_target_type offer on agg.offer_id = offer.offer_id and (inv.invoice_date_as_date >= offer.valid_from  and inv.invoice_date_as_date < offer.valid_to)
-
+    left join vat_invoice_id_mapping vat on inv.invoice_id = vat.vat_invoice_id
 )
 select *
 from revenue_recognition_at_invoice_time
