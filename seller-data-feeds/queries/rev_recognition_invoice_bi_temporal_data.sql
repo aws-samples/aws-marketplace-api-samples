@@ -1,8 +1,5 @@
 -- Revenue Recognition Reporting at Invoice Time
 
--- DISCLAIMER: This query uses the Agreement Feed, which is currently in private beta.
--- This query will be changed before General Availability (GA).
-
 -- General note: When executing this query we are assuming that the data ingested in the database is using
 -- two time axes (the valid_from column and the update_date column).
 -- See documentation for more details: https://docs.aws.amazon.com/marketplace/latest/userguide/data-feed.html#data-feed-details
@@ -72,6 +69,7 @@ agreements_with_uni_temporal_data as (
             *,
             ROW_NUMBER() OVER (PARTITION BY agreement_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
         from
+            -- TODO change to agreementfeed_v1 when Agreement Feed is GA'ed
             agreementfeed
     )
     where
@@ -328,7 +326,7 @@ pii_with_latest_revision as (
         row_num_latest_revision = 1
 ),
 
--- enrich each account history record
+-- enrich each account history record with company name from mailing_address
 accounts_with_history_with_company_name as (
     select
         acc.account_id,
@@ -583,8 +581,7 @@ invoiced_transactions_disbursed_disburse_flag_invoice_unified as (
         disburse_bank_trace_id
 ),
 
---add subscriber and payer addressID, payer address preference order: tax address > billing address > mailing address,
--- subscriber address preference order: tax address >  mailing address
+--add subscriber and payer addressID, payer address preference order: tax address > billing address > mailing address,  subscriber address preference order: tax address >  mailing address rf:https://issues.amazon.com/issues/MP-SELLER-REPORTS-13
 invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address as (
   select inv.*, agg.acceptor_account_id subscriber_account_id,
          coalesce (
@@ -610,15 +607,14 @@ invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address as (
                                                and (inv.invoice_date_as_date >= acc_end.valid_from  and inv.invoice_date_as_date < acc_end.valid_to)
 ),
 
---cppo offer_id has not been backfilled to offertargetfeed_v1 table, causing cppo offer be defined as 'Public' in previous step, we will convert them back to 'Private' in next step
+-- Channel partner offers do not exist in offertargetfeed_v1 table (as per legal requirement), causing cppo offer be defined as 'Public' in previous step, we will convert them back to 'Private' in next step
 cppo_offer_id as(
-select distinct agg.offer_id as offer_id
-from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
-left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
-
-except
-select distinct offer_id
-from offer_targets_with_uni_temporal_data
+  select distinct offer_id
+  from offers_with_uni_temporal_data
+  where
+    -- seller_account_id is null means the ISV owns the offer
+    seller_account_id is not null
+    and seller_account_id !=(select seller_account_id from seller_account)
 ),
 
 --When broker_id is 'AWS_EUROPE',invoice_id of listing fee is different from invoice_id of seller revenue, these 2 invoice_ids are linked through parent_billing_event_id and billing_event_id. Adding column 'VAT invoice ID' to provide the mapping between 2 invoice_ids
@@ -752,7 +748,9 @@ from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
     left join pii_with_latest_revision pii_payer on inv.payer_address_id = pii_payer.address_id
     left join pii_with_latest_revision pii_subscriber on inv.subscriber_address_id = pii_subscriber.address_id
     left join pii_with_latest_revision pii_end_user on inv.end_user_address_id = pii_end_user.address_id
+    -- TODO left join because agreement feed is not GA yet and not 100% backfilled yet -> will be moved to INNER join after backfill
     left join agreements_with_history agg on agg.agreement_id = inv.agreement_id and (inv.invoice_date_as_date >= agg.valid_from  and inv.invoice_date_as_date < agg.valid_to)
+    -- TODO left join because of the account history bug -> will move to inner join when fixed (and agreements are backfilled)
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
@@ -763,5 +761,4 @@ select *
 from revenue_recognition_at_invoice_time
 -- Filter results to within a 90 trailing period
 where cast(date_parse("Invoice Date",'%Y-%m-%dT%H:%i:%SZ') as date) > date_add('DAY', -90, current_date)
--- To filter on a specific month, uncomment the following and replace the dates:
 -- where "Invoice Date" >= '2021-08-01' and "Invoice Date"< '2021-10-15'

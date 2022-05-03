@@ -484,7 +484,6 @@ charge_amount as installment_amount
 from agreements_with_latest_revision agg
 -- retrieving only the agreements where the payment terms exist
 join payment_terms_with_latest_revision pt on agg.agreement_id = pt.agreement_Id
--- TODO left join because reseller's agreements offer IDs not exposed in manufacturer's Offer Feed 
 -- to get the latest offer target and offer name instead of at the agreement time use offers_with_latest_revision_with_target_type 
 left join offers_with_history_with_target_type ot on agg.offer_id = ot.offer_id and agg.acceptance_date  >= ot.valid_from and agg.acceptance_date < ot.valid_to
 -- to get the latest product id associated to an offer instead of at the agreement time  use offers_products_with_latest_revision
@@ -523,15 +522,6 @@ from agreements_at_subscription_intermediate agg
 join accounts_with_history_with_company_name buyer_acc on agg.acceptor_account_id = buyer_acc.account_id and agg.agreement_acceptance_date  >=  buyer_acc.valid_From and agg.agreement_acceptance_date < buyer_acc.valid_to
 -- left join as reseller account id can be null
 left join accounts_with_history_with_company_name res_acc on agg.reseller_account_id = res_acc.account_id and agg.agreement_acceptance_date  >=  res_acc.valid_From and agg.agreement_acceptance_date < res_acc.valid_to
-),
---CPPO offer_id do not exist in offertargetfeed_v1 table, causing CPPO offer be categorized as 'Public' instead of 'Private', will convert them back to 'Private' in the next step
-cppo_offer_id as (
-select distinct agg.offer_id as offer_id
-from agreements_at_subscription_time sub
-left join agreements_with_latest_revision agg on sub.agreement_id = agg.agreement_id
-except
-select distinct offer_id
-from offer_targets_with_uni_temporal_data
 )
 select 
 -----------------------
@@ -542,8 +532,8 @@ offer_id as "Offer ID"
 ,offer_name as "Offer Name"
 ,offer.opportunity_name as "Opportunity Name"
 ,offer.opportunity_description as "Opportunity Description"
--- offer target at time of subscription.
-, case when offer_id in (select offer_id from cppo_offer_id) then 'Private' else offer_target end as "Offer Target"
+-- offer target at time of subscription, forced to "private" for channel partners offers (because legal prevents us from exposing the actual targeting of CPPOs to ISVs, but so far, all those offers are private)
+, case when reseller_account_id is not null then 'Private' else offer_target end as "Offer Target"
 -- all agreement related data are surfaced as they were at time of subscription.
 ,agreement_id as "Agreement ID"
 ,agreement_revision as "Agreement Revision"
