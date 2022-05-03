@@ -1,4 +1,4 @@
-       -- General note: When executing this query we are assuming that the data ingested in the database is using
+    -- General note: When executing this query we are assuming that the data ingested in the database is using
     -- two time axes (the valid_from column and the update_date column).
     -- See documentation for more details: https://docs.aws.amazon.com/marketplace/latest/userguide/data-feed.html#data-feed-details
 
@@ -145,7 +145,7 @@ agreements_with_history as (
     from agreements_with_uni_temporal_data
 ),
    -- Let's get all the addresses and keep the latest address_id and valid_from combination
-	 -- We're transitioning from a bi-temporal data model to an uni-temporal data_model
+     -- We're transitioning from a bi-temporal data model to an uni-temporal data_model
    piifeed_with_uni_temporal_data as (
      select
       *
@@ -165,10 +165,10 @@ agreements_with_history as (
        and (delete_date is null or delete_date = '')
    ),
 
-	 -- Let's get the latest revision of an address
-	 -- An address_id can have multiple revisions where some of the columns can change.
-	 -- For the purpose of the sales compensation report, we want to get the latest revision of an address
-	 pii_with_latest_revision as (
+     -- Let's get the latest revision of an address
+     -- An address_id can have multiple revisions where some of the columns can change.
+     -- For the purpose of the sales compensation report, we want to get the latest revision of an address
+     pii_with_latest_revision as (
       select
        *
       from
@@ -254,12 +254,18 @@ agreements_with_history as (
           end_user_account_id,
           agreement_id,
           --As broker_id has not been backfilled, manually fill up this column
-  		  case when broker_id is null or broker_id = '' then 'AWS_INC' else broker_id end as broker_id,
+          case when broker_id is null or broker_id = '' then 'AWS_INC' else broker_id end as broker_id,
           -- convert an empty billing address to null. This will be later used in a COALESCE call
           case
            when billing_address_id <> '' then billing_address_id else null
           end as billing_address_id,
           CAST(amount as decimal(20, 10)) invoice_amount,
+          -- for AWS_EUROPE, invoice_id is different between listing fee and buyer charges, resulting in 2 different transaction_reference_ids
+          --  we are referencing in here is the "original charge" billing event for listing fees so we can it later on to identify the "original charge" transaction_reference_id and regroup records accordingly
+          --    AWS_INC listing fees do not have a parent but share same transaction_reference_id than charge -> returning "itself"
+          --    for other brokers, listing fees have a parent -> returnning this parent
+          --  for non listing fee records, this "original charge" is "itself"
+          case when transaction_type like 'AWS_REV_SHARE%'  and parent_billing_event_id <> '' then parent_billing_event_id else billing_event_id end as original_charge_billing_event_id,
           ROW_NUMBER() OVER (PARTITION BY billing_event_id, valid_from ORDER BY from_iso8601_timestamp(update_date) desc) as row_num
         from
           billingeventfeed_v1
@@ -272,6 +278,16 @@ agreements_with_history as (
       where row_num = 1
         -- ... and remove the soft-deleted one.
         and (delete_date is null or delete_date = '')
+    ),
+
+    billing_events_with_original_transaction_ref_id as (
+      select
+       be.*,
+       original_charge_be.transaction_reference_id original_charge_transaction_reference_id,
+       original_charge_be.invoice_date original_charge_invoice_date
+      from billing_events_with_uni_temporal_data be 
+        -- 1:1 relationship
+        join billing_events_with_uni_temporal_data original_charge_be on be.original_charge_billing_event_id=original_charge_be.billing_event_id
     ),
 
     -- Let's get the billing address for all DISBURSED invoices. This will be the address of the payer when
@@ -288,7 +304,7 @@ agreements_with_history as (
         -- the disbursed items will contain the billing address id
         billing_events_raw.action = 'DISBURSED'
         -- we only want to get the billing address id for the transaction line items where the seller is the receiver
-        -- of the amount
+        -- of the amount (this intrinsically excludes listign fees -> no need to worry about AWS_EUROPE and their different transaction_reference_id for listing fees versus buyer charges)
         and billing_events_raw.transaction_type like 'SELLER_%'
       group by
         billing_events_raw.transaction_reference_id,
@@ -301,11 +317,13 @@ agreements_with_history as (
   -- The new row is aggregated at transaction_reference_id - end_user_account_id level
   invoiced_and_forgiven_transactions as (
     select
-      transaction_reference_id,
+      -- keep only transaction_reference_id of buyer charge (transaction_reference_id for listing fees is not interresting for this report)
+      original_charge_transaction_reference_id as transaction_reference_id,
       product_id,
       billing.agreement_id,
       broker_id,
-      invoice_date,
+      -- keep only invoice_date of buyer charge (invoice_date for listing fees is not interresting for this report)
+      original_charge_invoice_date as invoice_date,
       -- A transaction will have the same billing_address_id for all of its line items. Remember that the billing event
       -- is uni temporal and we retrieved only the latest valid_from item
       --Note: Currently, only transaction_type like 'SELLER_%' have billing_address_id exposed. Make adjustment on the max() selection when billing_address_id of other transaction_types exposed.
@@ -334,7 +352,7 @@ agreements_with_history as (
       -- this is the account that is in the agreement
       agg.acceptor_account_id as subscriber_account_id
     from
-      billing_events_with_uni_temporal_data billing
+      billing_events_with_original_transaction_ref_id billing
       left join agreements_with_history agg on billing.agreement_id = agg.agreement_id
            and (billing.invoice_date >= agg.valid_from and billing.invoice_date < agg.valid_to)
       left join offers_with_history offer on agg.offer_id = offer.offer_id and (billing.invoice_date >= offer.valid_from  and billing.invoice_date < offer.valid_to)
@@ -342,15 +360,27 @@ agreements_with_history as (
       -- we only care for invoiced or forgiven items. disbursements are not part of the sales compensation report
       action in ('INVOICED', 'FORGIVEN')
     group by
-      transaction_reference_id,
+      -- for AWS_EUROPE, invoice_id is different between listing fee and buyer charges, resulting in 2 different transaction_reference_ids
+      --  --> we cannot group by transaction_reference_id as we want to aggregate both in a single record 
+      original_charge_transaction_reference_id,
+      -- redundant with original_charge_transaction_reference_id which is based on product_id -> keeping here for cleaner code
       product_id,
+
       billing.agreement_id,
+      -- agreement_ids are globally unique, and one agreement belongs to one broker -> redundant -> keeping here for cleaner code
       broker_id,
-      invoice_date,
+
+      -- for AWS_EUROPE, a different invoice (and thus with a slightly different date) is created for listing fees than the one for buyer charges
+      original_charge_invoice_date,
+
+      -- each invoice contains a single currency, original_charge_transaction_reference_id includes invoice -> redundant -> keeping here for cleaner code
       currency,
+
       offer.opportunity_id,
       -- there might be different end-users for the same transaction reference id. distributed licenses is an example
       end_user_account_id,
+
+      -- agreement has one and only one acceptor -> redundant -> keeping here for cleaner code 
       agg.acceptor_account_id
 ),
 
@@ -360,7 +390,7 @@ invoiced_items_with_product_and_billing_address as (
     products.product_code,
     products.title,
     payer_info.aws_account_id as payer_aws_account_id,
-    payer_info.account_id as payer_reference_id,
+    invoice_amounts.payer_account_id as payer_reference_id,
     customer_info.aws_account_id as end_user_aws_account_id,
     subscriber_info.aws_account_id as subscriber_aws_account_id,
     coalesce (
