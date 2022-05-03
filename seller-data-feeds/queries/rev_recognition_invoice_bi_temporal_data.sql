@@ -738,8 +738,6 @@ from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
 
     -- if you want to get current product title, replace the next join with: left join products_with_latest_revision p on p.product_id = inv.product_id
     join products_with_history p on p.product_id = inv.product_id and (inv.invoice_date_as_date >= p.valid_from  and inv.invoice_date_as_date < p.valid_to)
-    -- TODO /!\ problem between invoice_date which is < account.valid_from!! -> cannot make it an inner join now
-    --   -> change this when https://code.amazon.com/reviews/CR-52453819 is pushed
     left join accounts_with_history_with_company_name acc_payer on inv.payer_account_id = acc_payer.account_id
                                                                     and (inv.invoice_date_as_date >= acc_payer.valid_from  and inv.invoice_date_as_date < acc_payer.valid_to)
     -- left join because end_user_account_id is nullable (eg if the invoice is originated from a reseller)
@@ -756,7 +754,6 @@ from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
     left join accounts_with_history_with_company_name acc_reseller on agg.proposer_account_id = acc_reseller.account_id
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
-    -- TODO left join because reseller's agreements show offer IDs not exposed in manufacturer's Offer Feed (yet, Nimish seeking Legal Approval)
     left join offers_with_history_with_target_type offer on agg.offer_id = offer.offer_id and (inv.invoice_date_as_date >= offer.valid_from  and inv.invoice_date_as_date < offer.valid_to)
     left join vat_invoice_id_mapping vat on inv.invoice_id = vat.vat_invoice_id
 )
