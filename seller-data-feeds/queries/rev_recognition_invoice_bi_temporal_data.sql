@@ -468,31 +468,61 @@ invoiced_line_items_with_disbursement_info  as(
     left join
         (select distinct parent_billing_event_id, disbursed_amount_per_parent, last_disbursement_date, bank_trace_id from disbursed_line_items )disburse on invoice.billing_event_id = disburse.parent_billing_event_id),
 
+--When broker_id is 'AWS_EUROPE',invoice_id of listing fee is different from invoice_id of seller revenue, these 2 invoice_ids are linked through parent_billing_event_id and billing_event_id. Adding column 'VAT invoice ID' to provide the mapping between 2 invoice_ids
+--To map all amounts to the seller invoices, parent_billing_event_id is used when the transaction type is not SELLER_REV_SHARE
+--Below CTE maps the listing fee invoices to the related buyer invoice.
+--It's also used to override listing fee invoice values with the buyer invoice values for the fields that those values are different
+--(e.x. invoice_date, billing_address_id, transaction_reference_id, from_account_id, etc.)
+seller_invoice_id_mapping as(
+    select distinct
+        inv.invoice_id,
+        inv.billing_event_id, inv.invoice_date_as_date, inv.invoice_date,
+        inv.transaction_reference_id,inv.transaction_type, inv.from_account_id,
+        inv.billing_address_id, inv.payment_due_date, inv.agreement_id,
+        listing.invoice_id as listing_fee_invoice_id,
+        listing.transaction_reference_id as listing_fee_transaction_reference_id
+    from (
+        select
+        case
+            when transaction_type like 'SELLER_REV_SHARE%'
+            then billing_event_id
+            else parent_billing_event_id
+        end as billing_event_id_seller_rev,
+        billing_event_id, invoice_id, invoice_date_as_date, invoice_date, transaction_reference_id, transaction_type,
+        from_account_id, billing_address_id, payment_due_date, agreement_id
+        from billing_events_with_uni_temporal_data where broker_id != 'AWS_INC') inv
+    left join (
+        select distinct parent_billing_event_id, invoice_id, transaction_reference_id
+        from billing_events_with_uni_temporal_data
+        where broker_id != 'AWS_INC' and action = 'INVOICED' and transaction_type like 'AWS_REV_SHARE%' ) listing on inv.billing_event_id_seller_rev = listing.parent_billing_event_id
+     ),
 --unify disburse_flag across invoice_id
+--for those fields where listing fee invoice values are different from the customer invoices, listing fee values are replaced with parent customer invoice values.
 invoiced_disbursed_disburse_flag_invoice_unified as(
     select invoice_item.billing_event_id,
            invoice_item.valid_from,
            invoice_item.update_date,
            invoice_item.delete_date,
-           invoice_item.invoice_date_as_date,
-           invoice_item.invoice_date,
+           coalesce(map_to_buyer_invoice.invoice_date_as_date,invoice_item.invoice_date_as_date) invoice_date_as_date,
+           coalesce(map_to_buyer_invoice.invoice_date, invoice_item.invoice_date) invoice_date,
            invoice_item.transaction_type,
-           invoice_item.transaction_reference_id,
+           coalesce(map_to_buyer_invoice.transaction_reference_id, invoice_item.transaction_reference_id) transaction_reference_id,
            invoice_item.parent_billing_event_id,
            invoice_item.bank_trace_id,
            invoice_item.broker_id,
            invoice_item.product_id,
            invoice_item.disbursement_billing_event_id,
            invoice_item.action,
-           invoice_item.from_account_id,
+           coalesce(map_to_buyer_invoice.from_account_id, invoice_item.from_account_id) from_account_id,
            invoice_item.to_account_id,
            invoice_item.end_user_account_id,
-           invoice_item.billing_address_id,
+           coalesce(map_to_buyer_invoice.billing_address_id, invoice_item.billing_address_id) billing_address_id,
            invoice_item.amount,
            invoice_item.currency,
-           invoice_item.agreement_id,
-           invoice_item.invoice_id,
-           invoice_item.payment_due_date,
+           coalesce(map_to_buyer_invoice.agreement_id,invoice_item.agreement_id) agreement_id,
+           coalesce(map_to_buyer_invoice.invoice_id,invoice_item.invoice_id) invoice_id,
+           map_to_listing_fee_invoice.listing_fee_invoice_id,
+           coalesce(map_to_buyer_invoice.payment_due_date, invoice_item.payment_due_date) payment_due_date,
            invoice_item.usage_period_start_date,
            invoice_item.usage_period_end_date,
            case
@@ -512,6 +542,8 @@ invoiced_disbursed_disburse_flag_invoice_unified as(
             from invoiced_line_items_with_disbursement_info
             where disburse_flag_temp in ('Yes','Partial') ) disbursed_item
         on invoice_item.invoice_id = disbursed_item.invoice_id
+    left join seller_invoice_id_mapping map_to_buyer_invoice on invoice_item.invoice_id = map_to_buyer_invoice.listing_fee_invoice_id and map_to_buyer_invoice.transaction_type like 'SELLER_REV_SHARE%'
+    left join seller_invoice_id_mapping map_to_listing_fee_invoice on invoice_item.invoice_id = map_to_listing_fee_invoice.invoice_id and invoice_item.billing_event_id = map_to_listing_fee_invoice.billing_event_id
 ),
 invoiced_transactions_disbursed_disburse_flag_invoice_unified as (
   select
@@ -536,6 +568,7 @@ invoiced_transactions_disbursed_disburse_flag_invoice_unified as (
         product_id,
         invoice_date_as_date,
         invoice_date,
+        listing_fee_invoice_id,
         invoice_id,
         broker_id,
         transaction_reference_id,
@@ -552,7 +585,7 @@ invoiced_transactions_disbursed_disburse_flag_invoice_unified as (
                 -- We get the payer of the invoice from *any* transaction type that is not AWS and not BALANCE_ADJUSTMENT (because they are the same for a given end user + agreement + product).
                 else from_account_id
             end
-        ) as payer_account_id,
+            ) as payer_account_id,
         -- A transaction will have the same billing_address_id for all of its line items.
          --Note: Currently, only transaction_type like 'SELLER_%' have billing_address_id exposed. Make adjustment on the max() selection when billing_address_id of other transaction_types exposed.
         max(billing_address_id) as billing_address_id,
@@ -566,6 +599,7 @@ invoiced_transactions_disbursed_disburse_flag_invoice_unified as (
         product_id,
         invoice_date,
         invoice_date_as_date,
+        listing_fee_invoice_id,
         invoice_id,
         broker_id,
         currency,
@@ -617,16 +651,6 @@ cppo_offer_id as(
     and seller_account_id !=(select seller_account_id from seller_account)
 ),
 
---When broker_id is 'AWS_EUROPE',invoice_id of listing fee is different from invoice_id of seller revenue, these 2 invoice_ids are linked through parent_billing_event_id and billing_event_id. Adding column 'VAT invoice ID' to provide the mapping between 2 invoice_ids
-vat_invoice_id_mapping as(
-  select distinct inv.invoice_id, listing.invoice_id as vat_invoice_id
-  from
-    (select billing_event_id, invoice_id from billing_events_with_uni_temporal_data where broker_id = 'AWS_EUROPE') inv
-  left join
-    (select distinct parent_billing_event_id, invoice_id
-     from billing_events_with_uni_temporal_data
-        where broker_id = 'AWS_EUROPE' and action = 'INVOICED' and transaction_type like 'AWS_REV_SHARE%' ) listing on inv.billing_event_id = listing.parent_billing_event_id
-),
 revenue_recognition_at_invoice_time as (
 
 select
@@ -652,7 +676,7 @@ select
 
     --Subscriber Information
     acc_subscriber.aws_account_id as "Subscriber AWS Account ID",
-    acc_subscriber.encrypted_account_id as "End User Encrypted Account ID",
+    acc_subscriber.encrypted_account_id as "Subscriber Encrypted Account ID",
     pii_subscriber.company_name as "Subscriber Company Name",
     pii_subscriber.email_domain as "Subscriber Email Domain",
     pii_subscriber.city as "Subscriber City",
@@ -692,7 +716,7 @@ select
    -- Revenues --
    --------------
    inv.invoice_id as "Invoice ID",
-   vat.invoice_id as "Charge Invoice ID",
+   inv.listing_fee_invoice_id as "Listing Fee Invoice ID",
    inv.transaction_reference_id as "Transaction Reference ID",
    inv.invoice_date as "Invoice Date",
    inv.usage_period_start_date as "Usage Period Start Date",
@@ -755,7 +779,6 @@ from invoiced_disbursed_disburse_flag_invoice_unified_with_sub_address inv
                                                                         and (inv.invoice_date_as_date >= acc_reseller.valid_from  and inv.invoice_date_as_date < acc_reseller.valid_to)
     -- if you want to get current offer name, replace the next join with: left join offer_targets_with_latest_revision_with_target_type off on agg.offer_id = off.offer_id
     left join offers_with_history_with_target_type offer on agg.offer_id = offer.offer_id and (inv.invoice_date_as_date >= offer.valid_from  and inv.invoice_date_as_date < offer.valid_to)
-    left join vat_invoice_id_mapping vat on inv.invoice_id = vat.vat_invoice_id
 )
 select *
 from revenue_recognition_at_invoice_time
