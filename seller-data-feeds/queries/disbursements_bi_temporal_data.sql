@@ -444,7 +444,7 @@ invoiced_disbursed_line_items_unified as(
       payment_due_date
 ),
 -- Payer and End user address preference order: tax address > billing address > mailing address,
--- subscriber address preference order: tax address >  mailing address rf:https://issues.amazon.com/issues/MP-SELLER-REPORTS-13
+-- subscriber address preference order: tax address >  mailing address
 invoice_amounts_aggregated_with_sub_address as (
     select inv.*, agg.acceptor_account_id subscriber_account_id,
         offer.opportunity_id,
