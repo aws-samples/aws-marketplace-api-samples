@@ -405,7 +405,7 @@ billing_events_with_uni_temporal_data as (
         and (delete_date is null or delete_date = '')
 ),
 
--- for revenue recognition at invoice time, we are only interested at invoiced and forgiven records
+-- for revenue recognition at disbursement time, we are only interested at invoiced and forgiven records
 --  (ie, disbursements are skipped)
 invoiced_billing_events_with_uni_temporal_data as (
     select *
