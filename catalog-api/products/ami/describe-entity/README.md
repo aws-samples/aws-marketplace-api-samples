@@ -15,10 +15,11 @@ aws marketplace-catalog describe-entity \
     "EntityIdentifier": "00000000-0000-0000-0000-000000000000",
     "EntityArn": "arn:aws:aws-marketplace:us-east-1:1234567890012:AWSMarketplace/AmiProduct/00000000-0000-0000-0000-000000000000",
     "LastModifiedDate": "...",
-    "Details": "<ENTITY_SPECIFIC_DETAILS_AS_A_STRING>"
+    "Details": "<ENTITY_SPECIFIC_DETAILS_AS_A_STRING>",
+    "DetailsDocument": <ENTITY_SPECIFIC_DETAILS_AS_JSON>
 }
 ```
-`Details` attribute in DescribeEntity response contains the entity type specific JSON object as a string.
+`DetailsDocument` attribute in DescribeEntity response contains the entity type specific JSON object.
 
 **AmiProduct Details**
 ```commandline
@@ -26,7 +27,7 @@ aws marketplace-catalog describe-entity \
 aws marketplace-catalog describe-entity \
   --catalog "AWSMarketplace" \
   --entity-id "00000000-0000-0000-0000-000000000000" \
-  | jq -r '.Details' | jq .
+  --query DetailsDocument
 ```
 
 ```json
