@@ -27,7 +27,7 @@ aws marketplace-catalog describe-entity \
 aws marketplace-catalog describe-entity \
   --catalog "AWSMarketplace" \
   --entity-id "00000000-0000-0000-0000-000000000000" \
-  --query DetailsDocument | jq .
+  --query DetailsDocument
 ```
 
 ```json
