@@ -88,7 +88,8 @@ address_with_uni_temporal_data as (
     country_code,
     state_or_region,
     city,
-    postal_code,
+    --Postal codes are sometimes imported as numbers, make sure here they are all stored as string
+    cast(postal_code as varchar) as postal_code,
     row_num
   from
   (
@@ -181,38 +182,39 @@ accounts_with_history_with_company_name as (
 agreements_with_uni_temporal_data as (
   select
     agreement_id,
-    origin_offer_id,
+    offer_id,
     proposer_account_id,
     acceptor_account_id,
-    agreement_revision,
     from_iso8601_timestamp(valid_from) as valid_from,
-    from_iso8601_timestamp(start_date) as start_date,
-    from_iso8601_timestamp(end_date) as end_date,
-    from_iso8601_timestamp(acceptance_date) as acceptance_date,
-    agreement_type,
-    previous_agreement_id,
-    agreement_intent
+    from_iso8601_timestamp(start_time) as start_date,
+    from_iso8601_timestamp(end_time) as end_date,
+    from_iso8601_timestamp(acceptance_time) as acceptance_date,
+    intent,
+    preceding_agreement_id,
+    status,
+    status_reason_code,
+    currency_code
   from
   (
     select
       --empty value in Athena shows as '', change all '' value to null
       case when agreement_id = '' then null else agreement_id end as agreement_id,
-      origin_offer_id,
+      offer_id,
       proposer_account_id,
       acceptor_account_id,
-      agreement_revision,
       valid_from,
+      start_time,
+      end_time,
+      acceptance_time,
       delete_date,
-      start_date,
-      end_date,
-      acceptance_date,
-      agreement_type,
-      previous_agreement_id,
-      agreement_intent,
+      intent,
+      case when preceding_agreement_id = '' then null else preceding_agreement_id end as preceding_agreement_id,
+      status,
+      status_reason_code,
+      currency_code,
       row_number() over (partition by agreement_id, valid_from order by from_iso8601_timestamp(update_date) desc) as row_num
     from
-      -- TODO change to agreementfeed_v1 when Agreement Feed is GA'ed
-      agreementfeed
+      agreementfeed_v1
   )
   where
     -- keep latest ...
@@ -221,14 +223,13 @@ agreements_with_uni_temporal_data as (
     and (delete_date is null or delete_date = '')
 ),
 
-agreements_with_history as (
+agreements_revisions_with_history as (
   with agreements_with_window_functions as (
     select
       agreement_id,
-      origin_offer_id as offer_id,
+      offer_id,
       proposer_account_id,
       acceptor_account_id,
-      agreement_revision,
       start_date,
       end_date,
       acceptance_date,
@@ -245,9 +246,12 @@ agreements_with_history as (
           timestamp '2999-01-01 00:00:00'
       ) as valid_to,
       rank() over (partition by agreement_id order by valid_from asc) version,
-      agreement_type,
-      previous_agreement_id,
-      agreement_intent
+      preceding_agreement_id as origin_agreement_id,
+      intent as origin_intent,
+      currency_code,
+      status,
+      status_reason_code,
+      '' as agreement_revision
     from
       agreements_with_uni_temporal_data
   )
@@ -256,7 +260,6 @@ agreements_with_history as (
     offer_id,
     proposer_account_id,
     acceptor_account_id,
-    agreement_revision,
     start_date,
     end_date,
     acceptance_date,
@@ -268,9 +271,12 @@ agreements_with_history as (
         else valid_from
     end as valid_from_adjusted,
     valid_to,
-    agreement_type,
-    previous_agreement_id,
-    agreement_intent
+    origin_agreement_id,
+    origin_intent,
+    currency_code,
+    status,
+    status_reason_code,
+    agreement_revision
   from
     agreements_with_window_functions
 ),
@@ -625,7 +631,7 @@ billing_events_with_uni_temporal_data as (
       transaction_reference_id,
       parent_billing_event_id,
       -- casting in case data was imported as number
-      cast(bank_trace_id as varchar) as bank_trace_id,
+      case when bank_trace_id is not null then cast(bank_trace_id as varchar) else bank_trace_id end as bank_trace_id,
       broker_id,
       product_id,
       disbursement_billing_event_id,
@@ -641,8 +647,8 @@ billing_events_with_uni_temporal_data as (
       agreement_id,
       invoice_id,
       case when payment_due_date is null or payment_due_date = '' then null else from_iso8601_timestamp(payment_due_date) end as payment_due_date,
-      from_iso8601_timestamp(usage_period_start_date) as usage_period_start_date,
-      from_iso8601_timestamp(usage_period_end_date) as usage_period_end_date,
+      case when usage_period_start_date is null or usage_period_start_date = '' then null else from_iso8601_timestamp(usage_period_start_date) end as usage_period_start_date,
+      case when usage_period_end_date is null or usage_period_end_date = '' then null else from_iso8601_timestamp(usage_period_end_date) end as usage_period_end_date,
       buyer_transaction_reference_id,
       row_number() over (partition by billing_event_id, valid_from order by from_iso8601_timestamp(update_date) desc) as row_num
     from
@@ -735,7 +741,7 @@ billing_event_with_business_flags as (
         and disbursement.action = 'DISBURSED'
         and disbursement.transaction_type IN ('DISBURSEMENT', 'DISBURSEMENT_FAILURE')
         and bl.disbursement_billing_event_id = disbursement.billing_event_id
-    left join agreements_with_history as aggrement on
+    left join agreements_revisions_with_history as aggrement on
       bl.agreement_id = aggrement.agreement_id
         and bl.invoice_date >= aggrement.valid_from_adjusted
         and bl.invoice_date < aggrement.valid_to
@@ -1142,7 +1148,7 @@ line_items_with_window_functions_enrich_offer_product_address as (
       case when acc_enduser.mailing_address_id = '' then null else acc_enduser.mailing_address_id end) as end_user_address_id
   from
     line_items_with_window_functions as line
-  left join agreements_with_history as agreement on
+  left join agreements_revisions_with_history as agreement on
       line.agreement_id = agreement.agreement_id and line.buyer_invoice_date >= agreement.valid_from_adjusted and line.buyer_invoice_date < agreement.valid_to
   left join offers_with_history_with_target_type as offer on
         line.offer_id = offer.offer_id and line.buyer_invoice_date >= offer.valid_from and line.buyer_invoice_date < offer.valid_to
