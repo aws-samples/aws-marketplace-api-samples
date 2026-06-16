@@ -492,6 +492,7 @@ from
     )
 where
     row_num_latest_revision = 1
+    and (delete_date is null or delete_date = '')
 ),
 
 -- Join accounts to addresses for company name resolution.
@@ -522,8 +523,8 @@ select
         else awh.valid_from
     end as valid_from_adjusted,
     awh.valid_to,
-    least(awh.min_data_catalog, address.min_data_catalog) as min_data_catalog,
-    greatest(awh.max_data_catalog, address.max_data_catalog) as max_data_catalog
+    coalesce(least(awh.min_data_catalog, address.min_data_catalog), awh.min_data_catalog, address.min_data_catalog) as min_data_catalog,
+    coalesce(greatest(awh.max_data_catalog, address.max_data_catalog), awh.max_data_catalog, address.max_data_catalog) as max_data_catalog
 from accounts_with_history as awh
 left join address_with_latest_revision as address on
     awh.mailing_address_id = address.address_id and awh.mailing_address_id is not null
@@ -713,7 +714,6 @@ group by
 ),
 
 -- Join offers to targets, override CPPO offers to Private.
--- NOTE: offers_with_uni_temporal_data does not include offer_revision, so we join only on offer_id.
 offers_with_history_with_target_type as (
 select
     offer.offer_id,
@@ -743,6 +743,7 @@ select
 from offers_with_history as offer
 left join offer_target_type as off_tgt on
     offer.offer_id = off_tgt.offer_id
+    and offer.offer_revision = off_tgt.offer_revision
 group by
     offer.offer_id,
     offer.offer_revision,
@@ -1213,7 +1214,6 @@ select
     -- Wholesale_aws_tax_share_balance_impacting: helper column, used for calculating seller_net_revenue/disbursed_net_revenue/undisbursed_net_revenue etc.
     -- for wholesale invoice AWS tax share, currently the tax is paid by Reseller to AWS, then emitted by AWS
     -- so it only needed to be accounted in net revenue for resellers not ISV
-    -- for more details see this quip doc: https://quip-amazon.com/EyCBAaTQeuoM/CPPO-Billing-Event-Changes-Allow-Resale-Invoice
     -- background: the reason why it's named _balance_impacting is when we first implemented this, we didn't have to calculate the new disbursed/undibursed net revenue
     -- billing records with action='invoiced' has balance impacting properly configured, but 'disbursed' are all set to zero
 
@@ -1297,7 +1297,6 @@ select
     -- Wholesale_aws_tax_share_balance_impacting: helper column, used for calculating seller_net_revenue/disbursed_net_revenue/undisbursed_net_revenue etc.
     -- for wholesale invoice AWS tax share, currently the tax is paid by Reseller to AWS, then emitted by AWS
     -- so it only needed to be accounted in net revenue for resellers not ISV
-    -- for more details see this quip doc: https://quip-amazon.com/EyCBAaTQeuoM/CPPO-Billing-Event-Changes-Allow-Resale-Invoice
     -- background: the reason why it's named _balance_impacting is when we first implemented this, we didn't have to calculate the new disbursed/undibursed net revenue
     -- billing records with action='invoiced' has balance impacting properly configured, but 'disbursed' are all set to zero
     case
@@ -1538,7 +1537,6 @@ select
     -- Wholesale_aws_tax_share_balance_impacting: helper column, used for calculating seller_net_revenue/disbursed_net_revenue/undisbursed_net_revenue etc.
     -- for wholesale invoice AWS tax share, currently the tax is paid by Reseller to AWS, then emitted by AWS
     -- so it only needed to be accounted in net revenue for resellers not ISV
-    -- for more details see this quip doc: https://quip-amazon.com/EyCBAaTQeuoM/CPPO-Billing-Event-Changes-Allow-Resale-Invoice
     -- background: the reason why it's named _balance_impacting is when we first implemented this, we didn't have to calculate the new disbursed/undibursed net revenue
     -- billing records with action='invoiced' has balance impacting properly configured, but 'disbursed' are all set to zero
     wholesale_aws_tax_share_balance_impacting,
@@ -1617,7 +1615,6 @@ select
     -- Wholesale_aws_tax_share_balance_impacting: helper column, used for calculating seller_net_revenue/disbursed_net_revenue/undisbursed_net_revenue etc.
     -- for wholesale invoice AWS tax share, currently the tax is paid by Reseller to AWS, then emitted by AWS
     -- so it only needed to be accounted in net revenue for resellers not ISV
-    -- for more details see this quip doc: https://quip-amazon.com/EyCBAaTQeuoM/CPPO-Billing-Event-Changes-Allow-Resale-Invoice
     -- background: the reason why it's named _balance_impacting is when we first implemented this, we didn't have to calculate the new disbursed/undibursed net revenue
     -- billing records with action='invoiced' has balance impacting properly configured, but 'disbursed' are all set to zero
     wholesale_aws_tax_share_balance_impacting_disbursement_currency,
@@ -3552,19 +3549,7 @@ line_items_with_window_functions_enrich_offer_product_address_name_disbursement_
 -- Athena does not recognize calculation in the same query, adding steps here to do those calculations
 select
     *,
-    -- TODO: The Disbursement_Flag needs to be improved to handle partial refunds: https://i.amazon.com/issues/MP-INSIGHTS-3918
     case
-        -- TODO: This 'Failed' value should be move to a different column because it does not work
-        --       well with multiple/partial disbursements. I am not clear on what the intent was
-        --       when this was originally added in https://code.amazon.com/reviews/CR-170626160.
-        --
-        --       This Disbursement_Flag2 describes the status of the line item (which may involve multiple
-        --       successful and multiple failed disbursements). Each partial disbursement for a given line item
-        --       should have the _same_ value for this flag, so that the seller can filter for a
-        --       'Partially disbursed' line item (or any other flag value)  and then find all successful
-        --       and all failed disbursements that contributed to the 'Partially disbursed' (or whatever flag
-        --       desired value). This 'Failed' value breaks that invariant, so it will eventually result in
-        --       seller confusion, when a partial disbursement fails.
         when disbursement_status = 'DISBURSEMENT_FAILURE' then 'Failed'
 
         -- (1) there HAS been a disbursement, and there is NOTHING left to disburse:
@@ -3608,14 +3593,7 @@ line_items_with_window_functions_enrich_offer_product_address_name as (
 -- Athena does not recognize calculation in the same query, adding steps here to do those calculations
 select
     *,
-    -- TODO: Consolidate the disbursement_flag and disbursement_flag_status into a single column (and
-    --       update the QuickSight dashboard accordingly:
     case
-            -- TODO: This 'Failed' value should be move to a different column because it does not work
-            --       well with multiple/partial disbursements. I am not clear on what the intent was
-            --       when this was originally added in https://code.amazon.com/reviews/CR-170626160.
-            --
-            --       See more detailed comment on disbursement_flag above.
         when disbursement_flag = 'Failed' then 'Failed'
         -- This FIRST unioned query filters where disbursement_id_or_invoiced <> '<invoiced>', so disbursement_flag should never be 'No':
         when disbursement_flag = 'No' then 'Not disbursed' -- TBD: Should we distinguish 'Never disbursed' from settled via refund?
@@ -4050,8 +4028,7 @@ select
 
     seller_net_revenue_this_disbursement_id_if_disbursed as disbursed_net_revenue,
     undisbursed_net_revenue,
-    disbursement_period,
-    internal_buyer_invoice_line_item_surrogate_id_with_currency as silent_internal_report_transaction
+    disbursement_period
 from disbursed_amount_by_product_refactor
 )
 
