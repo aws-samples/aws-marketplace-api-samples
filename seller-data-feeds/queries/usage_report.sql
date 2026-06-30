@@ -122,7 +122,7 @@ from
         case when agreement_id = '' then null else agreement_id end as agreement_id,
         term_id,
         case when term_type = '' then null else term_type end as term_type,
-        case when term_configuration = '' then null else term_configuration end as term_configuration,
+        term_configuration,
         valid_from,
         delete_date,
         row_number() over (partition by agreement_id, term_id, valid_from order by from_iso8601_timestamp(update_date) desc) as row_num
